@@ -6,9 +6,13 @@ import { createSupabaseServerClient } from '@/lib/supabase-server';
 export async function POST(request: NextRequest) {
   try {
     const providedSecret = request.headers.get('x-cron-secret');
+    const authorization = request.headers.get('authorization');
+    const bearerToken = authorization?.toLowerCase().startsWith('bearer ')
+      ? authorization.slice('bearer '.length).trim()
+      : null;
     const expectedSecret = process.env.CRON_SECRET;
 
-    if (expectedSecret && providedSecret !== expectedSecret) {
+    if (expectedSecret && providedSecret !== expectedSecret && bearerToken !== expectedSecret) {
       return apiError('Unauthorized', 401);
     }
 
