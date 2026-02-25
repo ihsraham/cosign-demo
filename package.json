@@ -10,7 +10,7 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@erc7824/nitrolite-compat": "file:../sdk/compat",
+    "@erc7824/nitrolite-compat": "file:vendor/erc7824-nitrolite-compat-0.1.0.tgz",
     "@supabase/supabase-js": "^2.57.4",
     "next": "15.5.9",
     "react": "^19.2.3",
