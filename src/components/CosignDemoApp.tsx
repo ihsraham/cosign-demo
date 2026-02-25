@@ -309,6 +309,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
   const [walletProviderSource, setWalletProviderSource] = useState<WalletProviderSource | null>(null);
   const [client, setClient] = useState<NitroliteClient | null>(null);
   const connectedProviderRef = useRef<EIP1193Provider | null>(null);
+  const syncInFlightRef = useRef(false);
 
   const [core, setCore] = useState<CoreState>(EMPTY_CORE);
   const [rooms, setRooms] = useState<Room[]>([]);
@@ -644,6 +645,27 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     setEvents(payload.events ?? []);
   }, [walletAddress, initialRoomId, router]);
 
+  const syncRealtimeSnapshot = useCallback(async (roomIdOverride?: string) => {
+    if (!walletAddress || !client) return;
+    if (syncInFlightRef.current) return;
+
+    syncInFlightRef.current = true;
+    try {
+      await fetchRooms();
+
+      const roomId = roomIdOverride ?? activeRoomId;
+      if (roomId) {
+        await fetchRoomThread(roomId);
+      }
+
+      await refreshCoreData();
+    } catch {
+      // keep polling resilient; individual fetchers already set user-facing errors
+    } finally {
+      syncInFlightRef.current = false;
+    }
+  }, [walletAddress, client, fetchRooms, activeRoomId, fetchRoomThread, refreshCoreData]);
+
   useEffect(() => {
     if (!activeRoomId || !walletAddress) {
       setProposals([]);
@@ -669,9 +691,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
           filter: `room_id=eq.${activeRoomId}`,
         },
         () => {
-          void fetchRoomThread(activeRoomId);
-          void fetchRooms();
-          void refreshCoreData();
+          void syncRealtimeSnapshot(activeRoomId);
         },
       )
       .on(
@@ -683,7 +703,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
           filter: `room_id=eq.${activeRoomId}`,
         },
         () => {
-          void fetchRoomThread(activeRoomId);
+          void syncRealtimeSnapshot(activeRoomId);
         },
       )
       .subscribe();
@@ -691,7 +711,32 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [activeRoomId, walletAddress, fetchRoomThread, fetchRooms, refreshCoreData]);
+  }, [activeRoomId, walletAddress, syncRealtimeSnapshot]);
+
+  useEffect(() => {
+    if (!walletAddress || !client) return;
+
+    const tick = () => {
+      void syncRealtimeSnapshot();
+    };
+
+    const timer = window.setInterval(tick, 3500);
+    const onFocus = () => {
+      tick();
+    };
+    const onVisibilityChange = () => {
+      if (!document.hidden) tick();
+    };
+
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [walletAddress, client, syncRealtimeSnapshot]);
 
   const initializeWalletSession = useCallback(
     async (
@@ -898,13 +943,12 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
 
     void (async () => {
       try {
-        await fetchRooms();
-        await refreshCoreData();
+        await syncRealtimeSnapshot();
       } catch (error) {
         setSystemMessage(error instanceof Error ? error.message : 'Failed to refresh dashboard data');
       }
     })();
-  }, [client, walletAddress, refreshCoreData, fetchRooms]);
+  }, [client, walletAddress, syncRealtimeSnapshot]);
 
   const createRoom = useCallback(async () => {
     if (!walletAddress) {
@@ -1953,8 +1997,8 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                     <p className="font-semibold">Shoppers</p>
                     <InfoHint text="Both shoppers have equal approval weight (50/50)." />
                   </div>
-                  <p className="mt-2 font-mono text-xs">A: {activeRoom.participant_a}</p>
-                  <p className="mt-1 font-mono text-xs">B: {activeRoom.participant_b}</p>
+                  <p className="mt-2 break-all font-mono text-xs leading-relaxed">A: {activeRoom.participant_a}</p>
+                  <p className="mt-1 break-all font-mono text-xs leading-relaxed">B: {activeRoom.participant_b}</p>
                   <p className="mt-2 text-xs text-neutral-600">Quorum: 100 (50/50 equal weight)</p>
 
                   {currentCounterparty ? (
@@ -2092,7 +2136,10 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                   <span className={toStatusBadgeClass(activeProposal.status)}>{activeProposal.status}</span>
                 </div>
 
-                <p className="mt-2 text-xs text-neutral-700">Hash: <span className="font-mono">{activeProposal.payload_hash}</span></p>
+                <p className="mt-2 text-xs text-neutral-700">Hash:</p>
+                <p className="mt-1 break-all rounded border border-neutral-200 bg-white/60 px-2 py-1 font-mono text-[11px] leading-relaxed text-neutral-800">
+                  {activeProposal.payload_hash}
+                </p>
 
                 <div className="mt-3">
                   <div className="mb-1 flex items-center justify-between text-xs">
