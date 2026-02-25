@@ -261,6 +261,7 @@ function InfoHint({ text }: { text: string }) {
 }
 
 const COSIGN_SESSION_CONCEPT = 'team_purchase_approval';
+const READY_CHANNEL_STATUSES = new Set(['open', 'resizing']);
 
 function buildCosignSessionData(roomId: string, extra: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -279,6 +280,12 @@ function parseSessionData(input: string | undefined): Record<string, unknown> | 
   } catch {
     return null;
   }
+}
+
+function formatSignedUnits(amount: bigint, decimals: number): string {
+  const absolute = amount < 0n ? -amount : amount;
+  const prefix = amount > 0n ? '+' : amount < 0n ? '-' : '';
+  return `${prefix}${formatUnits(absolute, decimals)}`;
 }
 
 function isRetryableSubmitError(error: unknown): boolean {
@@ -366,6 +373,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
   const [devOutput, setDevOutput] = useState<string>('{}');
   const [devBusy, setDevBusy] = useState<string | null>(null);
   const [onboardingIndex, setOnboardingIndex] = useState(0);
+  const [submitConfirmProposalId, setSubmitConfirmProposalId] = useState<string | null>(null);
 
   useEffect(() => {
     const stored = window.localStorage.getItem('cosign_aliases');
@@ -442,6 +450,15 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     );
   }, [supportedAssets, activeRoom, fundsAssetSymbol]);
 
+  const activeRoomAsset = useMemo(() => {
+    if (!activeRoom) return null;
+    return (
+      supportedAssets.find(
+        (asset) => asset.symbol.toLowerCase() === activeRoom.asset_symbol.toLowerCase(),
+      ) ?? null
+    );
+  }, [activeRoom, supportedAssets]);
+
   const activeSession = useMemo(() => {
     if (!activeRoom?.app_session_id) return null;
     return (
@@ -472,6 +489,38 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
   const areFundsActionsLocked = false;
   const areCounterpartyTransferLocked = areRoomActionsLocked;
 
+  const hasReadyWalletChannelForActiveRoomAsset = useMemo(() => {
+    if (!activeRoom || !activeRoomAsset) return false;
+
+    const expectedToken = activeRoomAsset.token.toLowerCase();
+    return core.channels.some((channel) => {
+      const status = channel.status.toLowerCase();
+      return (
+        READY_CHANNEL_STATUSES.has(status) &&
+        channel.chain_id === activeRoomAsset.chainId &&
+        channel.token.toLowerCase() === expectedToken
+      );
+    });
+  }, [activeRoom, activeRoomAsset, core.channels]);
+
+  const addFundsToCheckoutDisabledReason = useMemo(() => {
+    if (!walletAddress) return 'Connect your wallet first.';
+    if (!activeRoom?.app_session_id) return 'Start Shared Checkout first.';
+    if (areRoomActionsLocked) return roomActionLockMessage;
+    if (!activeRoomAsset) return 'Room asset is not available on this Clearnode.';
+    if (!hasReadyWalletChannelForActiveRoomAsset) {
+      return `Open a channel with ${activeRoom.asset_symbol.toUpperCase()} to be able to add funds to checkout.`;
+    }
+    return null;
+  }, [
+    walletAddress,
+    activeRoom,
+    areRoomActionsLocked,
+    roomActionLockMessage,
+    activeRoomAsset,
+    hasReadyWalletChannelForActiveRoomAsset,
+  ]);
+
   const nextSessionVersion = useMemo(() => {
     let maxVersion = activeSession?.version ?? 0;
 
@@ -497,20 +546,40 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
   }, [activeSession, proposals]);
 
   const activeSessionBalanceRows = useMemo(() => {
-    if (!activeRoom || !activeSession) return [] as { participant: string; amount: string }[];
+    if (!activeRoom) return [] as { participant: string; rawAmount: bigint; amount: string }[];
 
-    const decimals =
-      supportedAssets.find(
-        (asset) => asset.symbol.toLowerCase() === activeRoom.asset_symbol.toLowerCase(),
-      )?.decimals ?? 6;
+    const decimals = activeRoomAsset?.decimals ?? 6;
+    const sessionByParticipant = new Map<string, bigint>([
+      [normalizeAddress(activeRoom.participant_a), 0n],
+      [normalizeAddress(activeRoom.participant_b), 0n],
+    ]);
 
-    return (activeSession.allocations ?? [])
-      .filter((allocation) => allocation.asset.toLowerCase() === activeRoom.asset_symbol.toLowerCase())
-      .map((allocation) => ({
-        participant: allocation.participant,
-        amount: formatUnits(BigInt(allocation.amount), decimals),
-      }));
-  }, [activeRoom, activeSession, supportedAssets]);
+    for (const allocation of activeSession?.allocations ?? []) {
+      if (allocation.asset.toLowerCase() !== activeRoom.asset_symbol.toLowerCase()) continue;
+      const participant = normalizeAddress(allocation.participant);
+      if (!sessionByParticipant.has(participant)) continue;
+      sessionByParticipant.set(participant, BigInt(allocation.amount));
+    }
+
+    return [
+      activeRoom.participant_a,
+      activeRoom.participant_b,
+    ].map((participant) => {
+      const rawAmount = sessionByParticipant.get(normalizeAddress(participant)) ?? 0n;
+      return {
+        participant,
+        rawAmount,
+        amount: formatUnits(rawAmount, decimals),
+      };
+    });
+  }, [activeRoom, activeRoomAsset, activeSession]);
+
+  const activeSessionBalanceTotal = useMemo(() => {
+    if (!activeRoom) return '0';
+    const decimals = activeRoomAsset?.decimals ?? 6;
+    const total = activeSessionBalanceRows.reduce((sum, row) => sum + row.rawAmount, 0n);
+    return formatUnits(total, decimals);
+  }, [activeRoom, activeRoomAsset, activeSessionBalanceRows]);
 
   const friendSessionSummary = useMemo<FriendSessionSummary[]>(() => {
     if (!walletAddress) return [];
@@ -1776,10 +1845,115 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       .includes(normalizeAddress(walletAddress));
   }, [activeProposal, walletAddress]);
 
+  const getParticipantDisplayName = useCallback((participant: string): string => {
+    const normalized = normalizeAddress(participant);
+    if (walletAddress && normalized === normalizeAddress(walletAddress)) return 'You';
+    const alias = aliases[normalized];
+    if (alias) return `${alias} (Friend)`;
+    return `Friend ${shortAddress(participant, 6)}`;
+  }, [walletAddress, aliases]);
+
   const currentCounterparty = useMemo(() => {
     if (!activeRoom || !walletAddress) return null;
     return counterpartOf(activeRoom, walletAddress);
   }, [activeRoom, walletAddress]);
+
+  const submitConfirmProposal = useMemo(() => {
+    if (!submitConfirmProposalId) return null;
+    if (activeProposal?.id === submitConfirmProposalId) return activeProposal;
+    return proposals.find((proposal) => proposal.id === submitConfirmProposalId) ?? null;
+  }, [submitConfirmProposalId, activeProposal, proposals]);
+
+  const submitConfirmPreview = useMemo(() => {
+    if (!submitConfirmProposal || !activeRoom) return null;
+
+    const payload = submitConfirmProposal.payload_json as {
+      intent?: string;
+      allocations?: RPCAppSessionAllocation[];
+      version?: number | string;
+    };
+
+    const decimals = activeRoomAsset?.decimals ?? 6;
+    const baseAllocations = getRoomSessionAllocations();
+    const beforeByParticipant = new Map<string, bigint>([
+      [normalizeAddress(activeRoom.participant_a), 0n],
+      [normalizeAddress(activeRoom.participant_b), 0n],
+    ]);
+
+    for (const allocation of baseAllocations) {
+      if (allocation.asset.toLowerCase() !== activeRoom.asset_symbol.toLowerCase()) continue;
+      beforeByParticipant.set(normalizeAddress(allocation.participant), BigInt(allocation.amount));
+    }
+
+    const nextAllocations =
+      Array.isArray(payload.allocations) && payload.allocations.length > 0
+        ? payload.allocations
+        : baseAllocations;
+
+    const afterByParticipant = new Map<string, bigint>(beforeByParticipant);
+    for (const allocation of nextAllocations) {
+      if (allocation.asset.toLowerCase() !== activeRoom.asset_symbol.toLowerCase()) continue;
+      const participant = normalizeAddress(allocation.participant);
+      if (!afterByParticipant.has(participant)) continue;
+      afterByParticipant.set(participant, BigInt(allocation.amount));
+    }
+
+    const participants = [activeRoom.participant_a, activeRoom.participant_b];
+    const rows = participants.map((participant) => {
+      const key = normalizeAddress(participant);
+      const before = beforeByParticipant.get(key) ?? 0n;
+      const after = afterByParticipant.get(key) ?? 0n;
+      const delta = after - before;
+      return {
+        participant,
+        before,
+        after,
+        delta,
+      };
+    });
+
+    const positive = rows.find((row) => row.delta > 0n) ?? null;
+    const negative = rows.find((row) => row.delta < 0n) ?? null;
+    const actionLabel = toHumanProposalLabel(submitConfirmProposal.kind, submitConfirmProposal.payload_json);
+
+    let summary = `This will apply "${actionLabel}" for both shoppers.`;
+    if (submitConfirmProposal.kind === 'create_session') {
+      summary = 'This starts a shared checkout for this cart. After this, both shoppers can approve add-funds and purchase decisions.';
+    } else if (submitConfirmProposal.kind === 'close_session') {
+      summary = 'This finishes the shared checkout. No new add-funds or purchase decisions can be applied on this cart.';
+    } else if (payload.intent === RPCAppStateIntent.Deposit && positive) {
+      summary = `${getParticipantDisplayName(positive.participant)} adds ${formatUnits(positive.delta, decimals)} ${activeRoom.asset_symbol.toUpperCase()} into this checkout.`;
+    } else if (payload.intent === RPCAppStateIntent.Operate && positive && negative) {
+      summary = `${getParticipantDisplayName(negative.participant)} pays ${formatUnits(-negative.delta, decimals)} ${activeRoom.asset_symbol.toUpperCase()} to ${getParticipantDisplayName(positive.participant)} inside this checkout.`;
+    }
+
+    return {
+      actionLabel,
+      summary,
+      rows,
+    };
+  }, [
+    submitConfirmProposal,
+    activeRoom,
+    activeRoomAsset,
+    getRoomSessionAllocations,
+    getParticipantDisplayName,
+  ]);
+
+  const openSubmitConfirm = useCallback((proposal: Proposal) => {
+    setSubmitConfirmProposalId(proposal.id);
+  }, []);
+
+  const closeSubmitConfirm = useCallback(() => {
+    setSubmitConfirmProposalId(null);
+  }, []);
+
+  const confirmSubmitProposal = useCallback(async () => {
+    if (!submitConfirmProposal) return;
+    const proposal = submitConfirmProposal;
+    setSubmitConfirmProposalId(null);
+    await submitProposal(proposal);
+  }, [submitConfirmProposal, submitProposal]);
 
   const roomShareUrl = useMemo(() => {
     if (!activeRoomId || typeof window === 'undefined') return '';
@@ -1807,6 +1981,19 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
 
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!submitConfirmProposalId) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSubmitConfirmProposalId(null);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [submitConfirmProposalId]);
 
   return (
     <main className="mx-auto max-w-7xl px-4 pb-10 pt-6 md:px-8 md:pt-10">
@@ -2126,18 +2313,25 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                       This cart points to a session that is not visible on the current Clearnode. Create a new shared cart with your friend.
                     </p>
                   ) : null}
-                  {activeSessionBalanceRows.length > 0 ? (
-                    <div className="mt-2 rounded-md border border-neutral-200 bg-neutral-50 p-2">
-                      <p className="text-[11px] font-semibold text-neutral-700">
-                        Session Balances ({activeRoom.asset_symbol.toUpperCase()})
-                      </p>
-                      {activeSessionBalanceRows.map((row) => (
-                        <p key={row.participant} className="mt-1 break-all font-mono text-[11px] text-neutral-700">
-                          {shortAddress(row.participant, 6)}: {row.amount}
+                  <div className="mt-2 rounded-md border border-neutral-200 bg-neutral-50 p-2">
+                    <p className="text-[11px] font-semibold text-neutral-700">
+                      Checkout Balance Breakdown ({activeRoom.asset_symbol.toUpperCase()})
+                    </p>
+                    {activeSessionBalanceRows.length === 0 ? (
+                      <p className="mt-1 text-[11px] text-neutral-600">No funds are inside this checkout yet.</p>
+                    ) : (
+                      <>
+                        <p className="mt-1 text-[11px] text-neutral-700">
+                          Total in checkout: {activeSessionBalanceTotal} {activeRoom.asset_symbol.toUpperCase()}
                         </p>
-                      ))}
-                    </div>
-                  ) : null}
+                        {activeSessionBalanceRows.map((row) => (
+                          <p key={row.participant} className="mt-1 break-all text-[11px] text-neutral-700">
+                            {getParticipantDisplayName(row.participant)}: <span className="font-mono">{row.amount}</span>
+                          </p>
+                        ))}
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
             ) : null}
@@ -2159,12 +2353,14 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                     <InfoHint text="Opens shared checkout for this cart. Both shoppers must approve once." />
                   </div>
                   <div className="inline-flex items-center gap-2">
-                    <button
-                      className="btn-primary rounded px-3 py-2 text-sm font-semibold"
-                      onClick={createDepositProposal}
-                      disabled={!activeRoom.app_session_id || busy === 'proposal_deposit' || areRoomActionsLocked}>
-                      {busy === 'proposal_deposit' ? 'Creating...' : 'Add Funds To Checkout'}
-                    </button>
+                    <span title={addFundsToCheckoutDisabledReason ?? undefined} className="inline-flex">
+                      <button
+                        className="btn-primary rounded px-3 py-2 text-sm font-semibold"
+                        onClick={createDepositProposal}
+                        disabled={Boolean(addFundsToCheckoutDisabledReason) || busy === 'proposal_deposit'}>
+                        {busy === 'proposal_deposit' ? 'Creating...' : 'Add Funds To Checkout'}
+                      </button>
+                    </span>
                     <InfoHint text="Moves funds into checkout balance. The wallet adding funds must submit after both agree." />
                   </div>
                   <div className="inline-flex items-center gap-2">
@@ -2186,6 +2382,19 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                     <InfoHint text="Finishes checkout with final balances so no new purchases can be proposed." />
                   </div>
                 </div>
+                {activeRoom.app_session_id && activeRoomAsset ? (
+                  <p
+                    className={`mt-3 rounded border px-3 py-2 text-xs ${
+                      hasReadyWalletChannelForActiveRoomAsset
+                        ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                        : 'border-orange-300 bg-orange-100 text-orange-900'
+                    }`}>
+                    Shared wallet channel for {activeRoom.asset_symbol.toUpperCase()}:{' '}
+                    {hasReadyWalletChannelForActiveRoomAsset
+                      ? 'ready'
+                      : `not ready. Open a channel with ${activeRoom.asset_symbol.toUpperCase()} to be able to add funds to checkout.`}
+                  </p>
+                ) : null}
                 {areRoomActionsLocked ? (
                   <p className="mt-3 rounded border border-neutral-300 bg-neutral-100 px-3 py-2 text-xs text-neutral-700">
                     {roomActionLockMessage}
@@ -2255,9 +2464,9 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
 
                   <button
                     className="btn-secondary rounded px-3 py-2 text-sm font-semibold"
-                    onClick={() => submitProposal(activeProposal)}
+                    onClick={() => openSubmitConfirm(activeProposal)}
                     disabled={busy === 'proposal_submit' || !canSubmitActiveProposal || areRoomActionsLocked}>
-                    {busy === 'proposal_submit' ? 'Applying...' : 'Apply Decision'}
+                    {busy === 'proposal_submit' ? 'Applying...' : 'Review & Apply'}
                   </button>
                 </div>
                 {activeProposalLabel === 'session_deposit' &&
@@ -2558,6 +2767,55 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
           </>
         ) : null}
       </section>
+
+      {submitConfirmProposal && submitConfirmPreview && activeRoom ? (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 px-4"
+          onClick={closeSubmitConfirm}>
+          <div
+            className="card w-full max-w-2xl p-4 md:p-5"
+            onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-lg font-bold">Confirm {submitConfirmPreview.actionLabel}</h3>
+              <span className="badge badge-pending">{activeRoom.asset_symbol.toUpperCase()}</span>
+            </div>
+
+            <p className="mt-2 text-sm text-neutral-700">{submitConfirmPreview.summary}</p>
+
+            <div className="mt-4 rounded-md border border-neutral-200 bg-neutral-50 p-3">
+              <p className="text-xs font-semibold uppercase text-neutral-700">
+                Checkout Allocation Change
+              </p>
+              <div className="mt-2 space-y-2">
+                {submitConfirmPreview.rows.map((row) => (
+                  <div
+                    key={`confirm-${row.participant}`}
+                    className="grid grid-cols-1 gap-1 rounded border border-neutral-200 bg-white/80 px-3 py-2 text-xs md:grid-cols-[1.4fr,1fr,1fr,1fr] md:items-center">
+                    <span className="font-semibold text-neutral-800">{getParticipantDisplayName(row.participant)}</span>
+                    <span className="font-mono text-neutral-700">Before: {formatUnits(row.before, activeRoomAsset?.decimals ?? 6)}</span>
+                    <span className="font-mono text-neutral-700">After: {formatUnits(row.after, activeRoomAsset?.decimals ?? 6)}</span>
+                    <span className={`font-mono ${row.delta > 0n ? 'text-emerald-700' : row.delta < 0n ? 'text-rose-700' : 'text-neutral-700'}`}>
+                      Change: {formatSignedUnits(row.delta, activeRoomAsset?.decimals ?? 6)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <button className="btn-secondary rounded px-3 py-2 text-sm font-semibold" onClick={closeSubmitConfirm}>
+                Cancel
+              </button>
+              <button
+                className="btn-primary rounded px-3 py-2 text-sm font-semibold"
+                onClick={confirmSubmitProposal}
+                disabled={busy === 'proposal_submit'}>
+                {busy === 'proposal_submit' ? 'Applying...' : 'Confirm & Apply'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
