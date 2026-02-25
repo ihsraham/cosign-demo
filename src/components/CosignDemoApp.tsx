@@ -210,7 +210,6 @@ function InfoHint({ text }: { text: string }) {
         type="button"
         className="hint-trigger"
         aria-label={text}
-        title={text}
         onClick={() => setOpen((value) => !value)}
         onBlur={() => setOpen(false)}>
         i
