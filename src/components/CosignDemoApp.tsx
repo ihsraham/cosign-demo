@@ -281,6 +281,20 @@ function parseSessionData(input: string | undefined): Record<string, unknown> | 
   }
 }
 
+function isRetryableSubmitError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+
+  return (
+    lower.includes('not connected') ||
+    lower.includes('connection closed') ||
+    lower.includes('socket closed') ||
+    lower.includes('network error') ||
+    lower.includes('websocket') ||
+    lower.includes('ws closed')
+  );
+}
+
 function stringifyDevValue(value: unknown): string {
   const seen = new WeakSet<object>();
   return JSON.stringify(
@@ -1569,19 +1583,30 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       await Promise.all([refreshCoreData(), fetchRooms(), fetchRoomThread(activeRoom.id)]);
       setSystemMessage('Proposal submitted successfully.');
     } catch (error) {
+      const retryable = isRetryableSubmitError(error);
       console.error('[cosign-demo] submitProposal failed', {
         proposalId: proposal.id,
         kind: proposal.kind,
         wallet: walletAddress,
         message: error instanceof Error ? error.message : String(error),
+        retryable,
       });
-      await postJson(`/api/proposals/${proposal.id}/submit`, {
-        wallet: walletAddress,
-        outcome: 'failed',
-        error: error instanceof Error ? error.message : 'Submission failed',
-      }).catch(() => null);
 
-      setSystemMessage(error instanceof Error ? error.message : 'Failed to submit proposal');
+      if (!retryable) {
+        await postJson(`/api/proposals/${proposal.id}/submit`, {
+          wallet: walletAddress,
+          outcome: 'failed',
+          error: error instanceof Error ? error.message : 'Submission failed',
+        }).catch(() => null);
+      }
+
+      setSystemMessage(
+        retryable
+          ? 'Connection dropped while applying. This decision is still ready. Reconnect and tap Apply Decision again.'
+          : error instanceof Error
+          ? error.message
+          : 'Failed to submit proposal',
+      );
       await Promise.all([fetchRooms(), fetchRoomThread(activeRoom.id)]).catch(() => null);
     } finally {
       setBusy(null);
