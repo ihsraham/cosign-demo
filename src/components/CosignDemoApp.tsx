@@ -295,6 +295,18 @@ function isRetryableSubmitError(error: unknown): boolean {
   );
 }
 
+function isMissingHomeChannelForDeposit(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+
+  return (
+    lower.includes('state.homechannelid is required for packing') ||
+    lower.includes('no channel exists for asset') ||
+    lower.includes('missing home channel id') ||
+    lower.includes('missing_home_channel')
+  );
+}
+
 function stringifyDevValue(value: unknown): string {
   const seen = new WeakSet<object>();
   return JSON.stringify(
@@ -1126,6 +1138,29 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     return normalizeAddress(walletAddress) === activeDepositSubmitter;
   }, [activeProposal, activeProposalLabel, activeDepositSubmitter, walletAddress]);
 
+  const ensureWalletCanSubmitSessionDeposit = useCallback(async (assetSymbol: string) => {
+    if (!client || !walletAddress) {
+      throw new Error('Connect your wallet before adding funds to checkout.');
+    }
+
+    try {
+      const latestState = await client.innerClient.getLatestState(
+        walletAddress as Address,
+        assetSymbol,
+        false,
+      );
+      if (!latestState.homeChannelId) {
+        throw new Error('missing_home_channel');
+      }
+    } catch (error) {
+      if (isRetryableSubmitError(error)) throw error;
+
+      throw new Error(
+        `This wallet cannot add funds to checkout yet. Add funds to your shared wallet first (${assetSymbol.toUpperCase()}), then try again.`,
+      );
+    }
+  }, [client, walletAddress]);
+
   const createSessionProposal = useCallback(async () => {
     if (!activeRoom || activeRoom.app_session_id) return;
 
@@ -1193,6 +1228,8 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       const rawAmount = await client.parseAmount(assetForRoom.token, proposalAmount);
       if (rawAmount <= 0n) throw new Error('Proposal amount must be greater than 0');
 
+      await ensureWalletCanSubmitSessionDeposit(activeRoom.asset_symbol);
+
       const nextVersion = nextSessionVersion;
       const requester = normalizeAddress(walletAddress) === normalizeAddress(activeRoom.participant_a)
         ? activeRoom.participant_a
@@ -1258,6 +1295,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     proposalAmount,
     proposalPurpose,
     getRoomSessionAllocations,
+    ensureWalletCanSubmitSessionDeposit,
     createProposal,
   ]);
 
@@ -1524,11 +1562,14 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
           );
 
           const positiveParticipants = new Set<string>();
+          const positiveDeltas: Array<{ participant: string; asset: string }> = [];
           for (const allocation of payload.allocations) {
             const key = `${normalizeAddress(allocation.participant)}::${allocation.asset.toLowerCase()}`;
             const currentAmount = baseByParticipant.get(key) ?? 0n;
             if (BigInt(allocation.amount) > currentAmount) {
-              positiveParticipants.add(normalizeAddress(allocation.participant));
+              const participant = normalizeAddress(allocation.participant);
+              positiveParticipants.add(participant);
+              positiveDeltas.push({ participant, asset: allocation.asset });
             }
           }
 
@@ -1537,6 +1578,14 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
             !positiveParticipants.has(normalizeAddress(walletAddress))
           ) {
             throw new Error('Only the depositing participant should submit this deposit proposal.');
+          }
+
+          if (positiveParticipants.size === 1) {
+            const depositor = Array.from(positiveParticipants)[0];
+            const depositAsset =
+              positiveDeltas.find((delta) => delta.participant === depositor)?.asset ??
+              activeRoom.asset_symbol;
+            await ensureWalletCanSubmitSessionDeposit(depositAsset);
           }
         }
 
@@ -1583,16 +1632,18 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       await Promise.all([refreshCoreData(), fetchRooms(), fetchRoomThread(activeRoom.id)]);
       setSystemMessage('Proposal submitted successfully.');
     } catch (error) {
-      const retryable = isRetryableSubmitError(error);
+      const transient = isRetryableSubmitError(error);
+      const missingHomeChannel = isMissingHomeChannelForDeposit(error);
+      const recoverable = transient || missingHomeChannel;
       console.error('[cosign-demo] submitProposal failed', {
         proposalId: proposal.id,
         kind: proposal.kind,
         wallet: walletAddress,
         message: error instanceof Error ? error.message : String(error),
-        retryable,
+        recoverable,
       });
 
-      if (!retryable) {
+      if (!recoverable) {
         await postJson(`/api/proposals/${proposal.id}/submit`, {
           wallet: walletAddress,
           outcome: 'failed',
@@ -1601,8 +1652,10 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       }
 
       setSystemMessage(
-        retryable
+        transient
           ? 'Connection dropped while applying. This decision is still ready. Reconnect and tap Apply Decision again.'
+          : missingHomeChannel
+          ? 'This wallet cannot add funds to checkout yet. Add funds to your shared wallet first, then tap Apply Decision again.'
           : error instanceof Error
           ? error.message
           : 'Failed to submit proposal',
@@ -1611,7 +1664,16 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     } finally {
       setBusy(null);
     }
-  }, [client, walletAddress, activeRoom, getRoomSessionAllocations, refreshCoreData, fetchRooms, fetchRoomThread]);
+  }, [
+    client,
+    walletAddress,
+    activeRoom,
+    getRoomSessionAllocations,
+    ensureWalletCanSubmitSessionDeposit,
+    refreshCoreData,
+    fetchRooms,
+    fetchRoomThread,
+  ]);
 
   const runDeposit = useCallback(async () => {
     if (!client || !selectedAsset) return;
