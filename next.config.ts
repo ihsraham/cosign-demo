@@ -5,6 +5,13 @@ const nextConfig: NextConfig = {
   images: {
     remotePatterns: [{ protocol: 'https', hostname: '**' }],
   },
+  webpack: (config) => {
+    config.resolve.alias = {
+      ...(config.resolve.alias ?? {}),
+      '@react-native-async-storage/async-storage': false,
+    };
+    return config;
+  },
 };
 
 export default nextConfig;

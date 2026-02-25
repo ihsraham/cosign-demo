@@ -4,7 +4,7 @@ This demo is a "shared wallet + shared cart approval" experience powered by Nitr
 
 ---
 
-## Part 1: Alice & Bob Story (No Tech Jargon)
+## Part 1: Alice & Bob Story
 
 Alice and Bob work together and need to buy tools every month.
 
@@ -122,4 +122,3 @@ cd /Users/maharshimishra/Documents/nitrolite/cosign-demo
 npm install
 npm run dev
 ```
-

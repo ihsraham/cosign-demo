@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import MetaMaskSDK from '@metamask/sdk';
 import {
   EventPoller,
   NitroliteClient,
@@ -51,6 +52,8 @@ type EIP1193Provider = {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
 };
 
+type WalletProviderSource = 'metamask_extension' | 'metamask_sdk';
+
 type CoreState = {
   assets: ClearNodeAsset[];
   channels: LedgerChannel[];
@@ -70,9 +73,9 @@ const EMPTY_CORE: CoreState = {
 const ONBOARDING_SLIDES = [
   {
     title: 'Connect Wallet',
-    subtitle: 'MetaMask on Sepolia',
+    subtitle: 'Extension or mobile',
     description:
-      'Connect MetaMask and switch to Sepolia so both shoppers can approve the same checkout together.',
+      'Connect your wallet on Sepolia. You can use MetaMask extension or MetaMask mobile.',
   },
   {
     title: 'Create A Shared Cart',
@@ -182,6 +185,42 @@ function getMetaMaskProvider(): EIP1193Provider | null {
   return eth.isMetaMask ? eth : null;
 }
 
+let metaMaskSDK: MetaMaskSDK | null = null;
+
+function getMetaMaskSdkProvider(): EIP1193Provider | null {
+  if (typeof window === 'undefined') return null;
+
+  if (!metaMaskSDK) {
+    metaMaskSDK = new MetaMaskSDK({
+      dappMetadata: {
+        name: 'Co-Sign Checkout Demo',
+        url: window.location.href,
+      },
+      checkInstallationImmediately: false,
+      injectProvider: false,
+      shouldShimWeb3: false,
+      useDeeplink: true,
+    });
+  }
+
+  const provider = metaMaskSDK.getProvider();
+  return (provider ?? null) as EIP1193Provider | null;
+}
+
+function getPreferredWalletProvider(): { provider: EIP1193Provider | null; source: WalletProviderSource | null } {
+  const extensionProvider = getMetaMaskProvider();
+  if (extensionProvider) {
+    return { provider: extensionProvider, source: 'metamask_extension' };
+  }
+
+  const sdkProvider = getMetaMaskSdkProvider();
+  if (sdkProvider) {
+    return { provider: sdkProvider, source: 'metamask_sdk' };
+  }
+
+  return { provider: null, source: null };
+}
+
 async function postJson<T>(url: string, body: Record<string, unknown>): Promise<T> {
   const response = await fetch(url, {
     method: 'POST',
@@ -267,7 +306,9 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
 
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [walletClient, setWalletClient] = useState<WalletClient | null>(null);
+  const [walletProviderSource, setWalletProviderSource] = useState<WalletProviderSource | null>(null);
   const [client, setClient] = useState<NitroliteClient | null>(null);
+  const connectedProviderRef = useRef<EIP1193Provider | null>(null);
 
   const [core, setCore] = useState<CoreState>(EMPTY_CORE);
   const [rooms, setRooms] = useState<Room[]>([]);
@@ -276,7 +317,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
   const [events, setEvents] = useState<RoomEvent[]>([]);
   const [hasAttemptedWalletRestore, setHasAttemptedWalletRestore] = useState(false);
 
-  const [systemMessage, setSystemMessage] = useState<string>('Connect MetaMask on Sepolia to begin.');
+  const [systemMessage, setSystemMessage] = useState<string>('Connect your wallet on Sepolia to begin.');
   const [sessionSyncWarning, setSessionSyncWarning] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -653,7 +694,12 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
   }, [activeRoomId, walletAddress, fetchRoomThread, fetchRooms, refreshCoreData]);
 
   const initializeWalletSession = useCallback(
-    async (provider: EIP1193Provider, account: string, announceSuccess: boolean) => {
+    async (
+      provider: EIP1193Provider,
+      account: string,
+      announceSuccess: boolean,
+      source: WalletProviderSource,
+    ) => {
       const targetChainHex = `0x${SEPOLIA_CHAIN_ID.toString(16)}`;
       try {
         const currentChainHex = (await provider.request({
@@ -685,7 +731,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
             ],
           });
         } else if (error?.code === -32002) {
-          throw new Error('MetaMask already has a pending request. Open the extension to continue.');
+          throw new Error('Your wallet already has a pending request. Open it and finish that step first.');
         } else {
           throw error;
         }
@@ -716,19 +762,27 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
 
       setWalletAddress(account);
       setWalletClient(viemWallet);
+      setWalletProviderSource(source);
       setClient(compatClient);
+      connectedProviderRef.current = provider;
       setSessionSyncWarning(null);
       if (announceSuccess) {
-        setSystemMessage('Connected to Sepolia. Ready for co-sign checkout sessions.');
+        setSystemMessage(
+          source === 'metamask_sdk'
+            ? 'Connected with MetaMask Mobile on Sepolia. Ready for co-sign checkout sessions.'
+            : 'Connected on Sepolia. Ready for co-sign checkout sessions.',
+        );
       }
     },
     [client],
   );
 
   const connectWallet = useCallback(async () => {
-    const provider = getMetaMaskProvider();
+    const { provider, source } = getPreferredWalletProvider();
     if (!provider) {
-      setSystemMessage('MetaMask was not detected. Please install or enable the MetaMask extension.');
+      setSystemMessage(
+        'MetaMask was not detected. Install the extension or open this page in MetaMask Mobile.',
+      );
       return;
     }
 
@@ -749,10 +803,10 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       })) as string[];
       const account = accounts[0];
       if (!account || !isAddress(account)) {
-        throw new Error('Failed to read connected account from MetaMask');
+        throw new Error('Failed to read connected account from wallet');
       }
 
-      await initializeWalletSession(provider, account, true);
+      await initializeWalletSession(provider, account, true, source ?? 'metamask_extension');
     } catch (error) {
       setSystemMessage(error instanceof Error ? error.message : 'Failed to connect wallet');
     } finally {
@@ -778,7 +832,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
         const accounts = (await provider.request({ method: 'eth_accounts' })) as string[];
         const account = accounts[0];
         if (!account || !isAddress(account) || cancelled) return;
-        await initializeWalletSession(provider, account, false);
+        await initializeWalletSession(provider, account, false, 'metamask_extension');
       } catch {
         // Silent restore should never surface errors.
       } finally {
@@ -810,7 +864,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
         await client.close();
       }
 
-      const provider = getMetaMaskProvider();
+      const provider = connectedProviderRef.current ?? getMetaMaskProvider() ?? getMetaMaskSdkProvider();
       if (provider) {
         try {
           await provider.request({
@@ -824,7 +878,9 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
 
       setWalletAddress(null);
       setWalletClient(null);
+      setWalletProviderSource(null);
       setClient(null);
+      connectedProviderRef.current = null;
       setRooms([]);
       setActiveRoomId(initialRoomId ?? null);
       setProposals([]);
@@ -1328,7 +1384,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       );
       if (recoveredAddress !== connectedAddress) {
         throw new Error(
-          `Signed with ${recoveredAddress}, expected ${connectedAddress}. Switch MetaMask account and sign again.`,
+          `Signed with ${recoveredAddress}, expected ${connectedAddress}. Switch to the connected wallet account and sign again.`,
         );
       }
       const quorumSig = toWalletQuorumSignature(rawSig);
@@ -1644,13 +1700,20 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
               <div className="rounded-lg border border-black/10 bg-white px-3 py-2 font-mono text-xs md:text-sm">
                 {walletAddress ? shortAddress(walletAddress, 10) : 'Wallet not connected'}
               </div>
+              <p className="text-[11px] text-neutral-700">
+                {walletAddress
+                  ? walletProviderSource === 'metamask_sdk'
+                    ? 'Connected via MetaMask Mobile'
+                    : 'Connected via MetaMask extension'
+                  : 'Sepolia network required'}
+              </p>
               <div className="flex gap-2">
                 {!walletAddress ? (
                   <button
                     className="btn-primary rounded-md px-4 py-2 font-semibold"
                     onClick={connectWallet}
                     disabled={busy === 'connect_wallet'}>
-                    {busy === 'connect_wallet' ? 'Connecting...' : 'Connect MetaMask'}
+                    {busy === 'connect_wallet' ? 'Connecting...' : 'Connect Wallet'}
                   </button>
                 ) : (
                   <button
