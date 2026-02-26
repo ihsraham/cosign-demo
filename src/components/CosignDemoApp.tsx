@@ -146,6 +146,8 @@ const BUTTON_MOTION = {
   transition: { type: 'spring', stiffness: 420, damping: 20 },
 } as const;
 
+const MAX_UINT256 = 2n ** 256n - 1n;
+
 const CARD_MOTION = {
   initial: { opacity: 0, y: 8 },
   animate: { opacity: 1, y: 0 },
@@ -1964,6 +1966,22 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
         setSystemMessage(message);
         showWalletActionError('deposit', message);
         return;
+      }
+
+      const allowance = await client.innerClient.checkTokenAllowance(
+        BigInt(selectedAsset.chainId),
+        selectedAsset.token,
+        walletAddress,
+      );
+
+      if (allowance < raw) {
+        const approvalMessage = `Requesting ${selectedAsset.symbol.toUpperCase()} spending approval in your wallet...`;
+        setSystemMessage(approvalMessage);
+        await client.innerClient.approveToken(
+          BigInt(selectedAsset.chainId),
+          selectedAsset.token,
+          MAX_UINT256,
+        );
       }
 
       await client.deposit(selectedAsset.token as Address, raw);
