@@ -23,9 +23,11 @@ import {
   type SubmitAppStateRequestParamsV04,
 } from '@erc7824/nitrolite-compat';
 import {
+  createPublicClient,
   createWalletClient,
   custom,
   formatUnits,
+  http,
   isAddress,
   recoverMessageAddress,
   type Address,
@@ -69,6 +71,16 @@ const EMPTY_CORE: CoreState = {
   entries: [],
   sessions: [],
 };
+
+const ERC20_BALANCE_OF_ABI = [
+  {
+    type: 'function',
+    name: 'balanceOf',
+    stateMutability: 'view',
+    inputs: [{ name: 'account', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+] as const;
 
 const ONBOARDING_SLIDES = [
   {
@@ -1738,11 +1750,66 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
   ]);
 
   const runDeposit = useCallback(async () => {
-    if (!client || !selectedAsset) return;
+    if (!client || !selectedAsset || !walletAddress) return;
 
     setBusy('deposit');
     try {
       const raw = await client.parseAmount(selectedAsset.token, fundingAmount);
+      if (raw <= 0n) {
+        setSystemMessage('Enter an amount greater than 0.');
+        return;
+      }
+
+      const configuredRPCs = blockchainRPCsFromEnv();
+      const rpcUrl =
+        configuredRPCs[selectedAsset.chainId] ??
+        (selectedAsset.chainId === SEPOLIA_CHAIN_ID ? sepolia.rpcUrls.default.http[0] : null);
+
+      if (!rpcUrl) {
+        setSystemMessage(
+          `No RPC URL configured for chain ${selectedAsset.chainId}. Cannot validate ${selectedAsset.symbol.toUpperCase()} balance.`,
+        );
+        return;
+      }
+
+      const publicClient = createPublicClient({
+        chain: selectedAsset.chainId === SEPOLIA_CHAIN_ID ? sepolia : undefined,
+        transport: http(rpcUrl),
+      });
+
+      const onchainBalance = await publicClient.readContract({
+        address: selectedAsset.token as Address,
+        abi: ERC20_BALANCE_OF_ABI,
+        functionName: 'balanceOf',
+        args: [walletAddress as Address],
+      });
+
+      if (onchainBalance < raw) {
+        setSystemMessage(
+          `Insufficient on-chain ${selectedAsset.symbol.toUpperCase()} balance. Requested ${formatUnits(
+            raw,
+            selectedAsset.decimals,
+          )}, available ${formatUnits(onchainBalance, selectedAsset.decimals)}.`,
+        );
+        return;
+      }
+
+      const allowance = await client.innerClient.checkTokenAllowance(
+        BigInt(selectedAsset.chainId),
+        selectedAsset.token,
+        walletAddress,
+      );
+
+      if (allowance < raw) {
+        setSystemMessage(
+          `Allowance for ${selectedAsset.symbol.toUpperCase()} is too low. Requested ${formatUnits(
+            raw,
+            selectedAsset.decimals,
+          )}, allowance ${formatUnits(allowance, selectedAsset.decimals)}.`,
+        );
+        return;
+      }
+
       await client.deposit(selectedAsset.token as Address, raw);
       await refreshCoreData();
       setSystemMessage(`Added ${fundingAmount} ${selectedAsset.symbol.toUpperCase()} to your shared wallet.`);
@@ -1751,7 +1818,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     } finally {
       setBusy(null);
     }
-  }, [client, selectedAsset, fundingAmount, refreshCoreData]);
+  }, [client, selectedAsset, walletAddress, fundingAmount, refreshCoreData]);
 
   const runWithdraw = useCallback(async () => {
     if (!client || !selectedAsset) return;
