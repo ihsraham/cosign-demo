@@ -4,6 +4,31 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import MetaMaskSDK from '@metamask/sdk';
+import { AnimatePresence, motion } from 'motion/react';
+import { toast } from 'sonner';
+import {
+  ArrowDownToLine,
+  ArrowRightLeft,
+  ArrowUpFromLine,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  ExternalLink,
+  Info,
+  LogOut,
+  PenLine,
+  PlayCircle,
+  Plus,
+  Receipt,
+  Send,
+  ShoppingCart,
+  Terminal,
+  Wallet,
+  XCircle,
+} from 'lucide-react';
 import {
   EventPoller,
   NitroliteClient,
@@ -114,6 +139,18 @@ const ONBOARDING_SLIDES = [
       'Approve purchases, finish checkout, and review your activity feed and balances.',
   },
 ] as const;
+
+const BUTTON_MOTION = {
+  whileHover: { scale: 1.02 },
+  whileTap: { scale: 0.97 },
+  transition: { type: 'spring', stiffness: 420, damping: 20 },
+} as const;
+
+const CARD_MOTION = {
+  initial: { opacity: 0, y: 8 },
+  animate: { opacity: 1, y: 0 },
+  transition: { duration: 0.26, ease: 'easeOut' },
+} as const;
 
 function shortAddress(value: string, take = 6): string {
   if (!value) return '-';
@@ -263,7 +300,7 @@ function InfoHint({ text }: { text: string }) {
         aria-label={text}
         onClick={() => setOpen((value) => !value)}
         onBlur={() => setOpen(false)}>
-        i
+        <Info size={13} strokeWidth={2.2} />
       </button>
       <span className={`hint-bubble ${open ? 'hint-open' : ''}`} role="tooltip">
         {text}
@@ -274,6 +311,7 @@ function InfoHint({ text }: { text: string }) {
 
 const COSIGN_SESSION_CONCEPT = 'team_purchase_approval';
 const READY_CHANNEL_STATUSES = new Set(['open', 'resizing']);
+const FUNDS_ASSET_OPTIONS: Array<'usdc' | 'weth'> = ['usdc', 'weth'];
 
 function buildCosignSessionData(roomId: string, extra: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -324,6 +362,45 @@ function isMissingHomeChannelForDeposit(error: unknown): boolean {
     lower.includes('missing home channel id') ||
     lower.includes('missing_home_channel')
   );
+}
+
+function toHumanErrorMessage(error: unknown, fallback: string): string {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+      ? error
+      : fallback;
+  const lower = message.toLowerCase();
+
+  if (
+    lower.includes('allowance is not sufficient to cover the deposit amount') ||
+    lower.includes('allowance is too low')
+  ) {
+    return 'Token approval is too low for this amount. Approve more spending in your wallet, then try again.';
+  }
+
+  if (lower.includes('home deposit is still ongoing')) {
+    return 'A previous add-funds transaction is still processing. Wait for it to finish before trying again.';
+  }
+
+  if (lower.includes('state.homechannelid is required for packing')) {
+    return 'This wallet cannot apply add funds yet because the shared wallet channel for this asset is not ready.';
+  }
+
+  if (lower.includes('signature from non-participant')) {
+    return 'One approval came from an address that is not in this cart. Reconnect both wallets and sign again.';
+  }
+
+  if (lower.includes('connection closed') || lower.includes('not connected') || lower.includes('socket closed')) {
+    return 'Connection to Clearnode dropped. Reconnect and retry.';
+  }
+
+  if (lower.includes('0x2e3b1ec0')) {
+    return 'The channel creation transaction would fail on-chain. There is likely a stuck pending channel state for this asset.';
+  }
+
+  return message;
 }
 
 function stringifyDevValue(value: unknown): string {
@@ -391,7 +468,14 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
   const [devOutput, setDevOutput] = useState<string>('{}');
   const [devBusy, setDevBusy] = useState<string | null>(null);
   const [onboardingIndex, setOnboardingIndex] = useState(0);
+  const [onboardingDirection, setOnboardingDirection] = useState<1 | -1>(1);
   const [submitConfirmProposalId, setSubmitConfirmProposalId] = useState<string | null>(null);
+  const [copiedInvite, setCopiedInvite] = useState(false);
+  const copyInviteTimerRef = useRef<number | null>(null);
+
+  const notifySuccess = useCallback((message: string) => toast.success(message), []);
+  const notifyError = useCallback((message: string) => toast.error(message), []);
+  const notifyWarning = useCallback((message: string) => toast.warning(message), []);
 
   const clearWalletActionError = useCallback(() => {
     setWalletActionError(null);
@@ -405,8 +489,10 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
 
   const showWalletActionError = useCallback(
     (source: 'deposit' | 'withdraw' | 'transfer' | 'close', message: string) => {
-      setWalletActionError(message);
+      const userMessage = toHumanErrorMessage(message, 'Wallet action failed');
+      setWalletActionError(userMessage);
       setWalletActionErrorSource(source);
+      toast.error(userMessage);
       if (walletActionErrorShakeTimerRef.current !== null) {
         window.clearTimeout(walletActionErrorShakeTimerRef.current);
         walletActionErrorShakeTimerRef.current = null;
@@ -436,6 +522,9 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     return () => {
       if (walletActionErrorShakeTimerRef.current !== null) {
         window.clearTimeout(walletActionErrorShakeTimerRef.current);
+      }
+      if (copyInviteTimerRef.current !== null) {
+        window.clearTimeout(copyInviteTimerRef.current);
       }
     };
   }, []);
@@ -489,11 +578,13 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     [core.assets],
   );
 
+  const supportedAssetSymbols = useMemo(
+    () => new Set(supportedAssets.map((asset) => asset.symbol.toLowerCase())),
+    [supportedAssets],
+  );
+
   const selectedAsset = useMemo(
-    () =>
-      supportedAssets.find((asset) => asset.symbol.toLowerCase() === fundsAssetSymbol) ??
-      supportedAssets[0] ??
-      null,
+    () => supportedAssets.find((asset) => asset.symbol.toLowerCase() === fundsAssetSymbol) ?? null,
     [supportedAssets, fundsAssetSymbol],
   );
 
@@ -722,7 +813,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
           : null,
       );
     } catch (error) {
-      setSystemMessage(error instanceof Error ? error.message : 'Failed to refresh dashboard data');
+      setSystemMessage(toHumanErrorMessage(error, 'Failed to refresh dashboard data'));
     }
   }, [client]);
 
@@ -746,7 +837,9 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       setActiveRoomId(fetchedRooms[0]?.id ?? null);
       setProposals([]);
       setEvents([]);
-      setSystemMessage('This shared cart is only visible to invited shoppers. Open one of your carts instead.');
+      const warning = 'This shared cart is only visible to invited shoppers. Open one of your carts instead.';
+      setSystemMessage(warning);
+      notifyWarning(warning);
       router.replace('/');
       return;
     }
@@ -758,7 +851,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     if (!activeRoomId && fetchedRooms.length > 0) {
       setActiveRoomId(initialRoomId ?? fetchedRooms[0].id);
     }
-  }, [walletAddress, activeRoomId, initialRoomId, router]);
+  }, [walletAddress, activeRoomId, initialRoomId, router, notifyWarning]);
 
   const fetchRoomThread = useCallback(async (roomId: string) => {
     if (!walletAddress) return;
@@ -779,7 +872,9 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
         setEvents([]);
         if (initialRoomId) {
           setActiveRoomId(null);
-          setSystemMessage('You do not have access to this shared cart. Open one of your carts instead.');
+          const warning = 'You do not have access to this shared cart. Open one of your carts instead.';
+          setSystemMessage(warning);
+          notifyWarning(warning);
           router.replace('/');
           return;
         }
@@ -789,7 +884,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
 
     setProposals(payload.proposals ?? []);
     setEvents(payload.events ?? []);
-  }, [walletAddress, initialRoomId, router]);
+  }, [walletAddress, initialRoomId, router, notifyWarning]);
 
   const syncRealtimeSnapshot = useCallback(async (roomIdOverride?: string) => {
     if (!walletAddress || !client) return;
@@ -999,7 +1094,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
 
       await initializeWalletSession(provider, account, true, source ?? 'metamask_extension');
     } catch (error) {
-      setSystemMessage(error instanceof Error ? error.message : 'Failed to connect wallet');
+      setSystemMessage(toHumanErrorMessage(error, 'Failed to connect wallet'));
     } finally {
       setBusy(null);
     }
@@ -1091,19 +1186,23 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       try {
         await syncRealtimeSnapshot();
       } catch (error) {
-        setSystemMessage(error instanceof Error ? error.message : 'Failed to refresh dashboard data');
+        setSystemMessage(toHumanErrorMessage(error, 'Failed to refresh dashboard data'));
       }
     })();
   }, [client, walletAddress, syncRealtimeSnapshot]);
 
   const createRoom = useCallback(async () => {
     if (!walletAddress) {
-      setSystemMessage('Connect wallet before creating a room.');
+      const message = 'Connect wallet before creating a room.';
+      setSystemMessage(message);
+      notifyError(message);
       return;
     }
 
     if (!isAddress(createRoomCounterparty)) {
-      setSystemMessage('Counterparty address must be a valid EVM address.');
+      const message = 'Counterparty address must be a valid EVM address.';
+      setSystemMessage(message);
+      notifyError(message);
       return;
     }
 
@@ -1121,13 +1220,17 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       setRooms((prev) => [payload.room, ...prev]);
       setActiveRoomId(payload.room.id);
       router.push(`/r/${payload.room.id}`);
-      setSystemMessage('Room created. Share the room link with your teammate.');
+      const success = 'Room created. Share the room link with your teammate.';
+      setSystemMessage(success);
+      notifySuccess(success);
     } catch (error) {
-      setSystemMessage(error instanceof Error ? error.message : 'Failed to create room');
+      const message = toHumanErrorMessage(error, 'Failed to create room');
+      setSystemMessage(message);
+      notifyError(message);
     } finally {
       setBusy(null);
     }
-  }, [walletAddress, createRoomCounterparty, createRoomAsset, router]);
+  }, [walletAddress, createRoomCounterparty, createRoomAsset, router, notifySuccess, notifyError]);
 
   const upsertAlias = useCallback(() => {
     if (!activeRoom) return;
@@ -1172,9 +1275,11 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
         kind,
         label,
       });
-      setSystemMessage(`${label} request created. Both shoppers must agree.`);
+      const success = `${label} request created. Both shoppers must agree.`;
+      setSystemMessage(success);
+      notifySuccess(success);
     },
-    [activeRoom, walletAddress, fetchRoomThread],
+    [activeRoom, walletAddress, fetchRoomThread, notifySuccess],
   );
 
   const getRoomSessionAllocations = useCallback((): RPCAppSessionAllocation[] => {
@@ -1326,11 +1431,13 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
         payloadHash,
       );
     } catch (error) {
-      setSystemMessage(error instanceof Error ? error.message : 'Failed to create session proposal');
+      const message = toHumanErrorMessage(error, 'Failed to create session proposal');
+      setSystemMessage(message);
+      notifyError(message);
     } finally {
       setBusy(null);
     }
-  }, [activeRoom, createProposal]);
+  }, [activeRoom, createProposal, notifyError]);
 
   const createDepositProposal = useCallback(async () => {
     if (!activeRoom || !activeRoom.app_session_id || !client || !walletAddress) return;
@@ -1401,7 +1508,9 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       await createProposal('operate', payload as unknown as Record<string, unknown>, payloadHash);
     } catch (error) {
       console.error('[cosign-demo] createDepositProposal failed', error);
-      setSystemMessage(error instanceof Error ? error.message : 'Failed to create deposit proposal');
+      const message = toHumanErrorMessage(error, 'Failed to create deposit proposal');
+      setSystemMessage(message);
+      notifyError(message);
     } finally {
       setBusy(null);
     }
@@ -1417,6 +1526,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     getRoomSessionAllocations,
     ensureWalletCanSubmitSessionDeposit,
     createProposal,
+    notifyError,
   ]);
 
   const createOperateProposal = useCallback(async () => {
@@ -1506,7 +1616,9 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       await createProposal('operate', payload as unknown as Record<string, unknown>, payloadHash);
     } catch (error) {
       console.error('[cosign-demo] createOperateProposal failed', error);
-      setSystemMessage(error instanceof Error ? error.message : 'Failed to create operate proposal');
+      const message = toHumanErrorMessage(error, 'Failed to create operate proposal');
+      setSystemMessage(message);
+      notifyError(message);
     } finally {
       setBusy(null);
     }
@@ -1521,6 +1633,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     proposalPurpose,
     getRoomSessionAllocations,
     createProposal,
+    notifyError,
   ]);
 
   const createCloseProposal = useCallback(async () => {
@@ -1564,15 +1677,18 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
 
       await createProposal('close_session', payload, payloadHash);
     } catch (error) {
-      setSystemMessage(error instanceof Error ? error.message : 'Failed to create close proposal');
+      const message = toHumanErrorMessage(error, 'Failed to create close proposal');
+      setSystemMessage(message);
+      notifyError(message);
     } finally {
       setBusy(null);
     }
-  }, [activeRoom, nextSessionVersion, core.assets, getRoomSessionAllocations, createProposal]);
+  }, [activeRoom, nextSessionVersion, core.assets, getRoomSessionAllocations, createProposal, notifyError]);
 
   const signProposal = useCallback(async (proposal: Proposal) => {
     if (!walletClient || !walletAddress) {
       setSystemMessage('Connect wallet before signing proposals.');
+      notifyError('Connect wallet before signing proposals.');
       return;
     }
 
@@ -1620,13 +1736,17 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
         await fetchRoomThread(activeRoomId);
       }
 
-      setSystemMessage('Proposal signed. Waiting for quorum if needed.');
+      const success = 'Proposal signed. Waiting for quorum if needed.';
+      setSystemMessage(success);
+      notifySuccess(success);
     } catch (error) {
-      setSystemMessage(error instanceof Error ? error.message : 'Failed to sign proposal');
+      const message = toHumanErrorMessage(error, 'Failed to sign proposal');
+      setSystemMessage(message);
+      notifyError(message);
     } finally {
       setBusy(null);
     }
-  }, [walletClient, walletAddress, activeRoomId, fetchRoomThread]);
+  }, [walletClient, walletAddress, activeRoomId, fetchRoomThread, notifyError, notifySuccess]);
 
   const submitProposal = useCallback(async (proposal: Proposal) => {
     if (!client || !walletAddress || !activeRoom) return;
@@ -1636,6 +1756,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     const signatures = Object.values(proposal.signatures_json ?? {});
     if (signatures.length === 0) {
       setSystemMessage('No signatures found for this proposal.');
+      notifyError('No signatures found for this proposal.');
       setBusy(null);
       return;
     }
@@ -1750,7 +1871,9 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       });
 
       await Promise.all([refreshCoreData(), fetchRooms(), fetchRoomThread(activeRoom.id)]);
-      setSystemMessage('Proposal submitted successfully.');
+      const success = 'Proposal submitted successfully.';
+      setSystemMessage(success);
+      notifySuccess(success);
     } catch (error) {
       const transient = isRetryableSubmitError(error);
       const missingHomeChannel = isMissingHomeChannelForDeposit(error);
@@ -1767,19 +1890,17 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
         await postJson(`/api/proposals/${proposal.id}/submit`, {
           wallet: walletAddress,
           outcome: 'failed',
-          error: error instanceof Error ? error.message : 'Submission failed',
+          error: toHumanErrorMessage(error, 'Submission failed'),
         }).catch(() => null);
       }
 
-      setSystemMessage(
-        transient
-          ? 'Connection dropped while applying. This decision is still ready. Reconnect and tap Apply Decision again.'
-          : missingHomeChannel
-          ? 'This wallet cannot add funds to checkout yet. Add funds to your shared wallet first, then tap Apply Decision again.'
-          : error instanceof Error
-          ? error.message
-          : 'Failed to submit proposal',
-      );
+      const message = transient
+        ? 'Connection dropped while applying. This decision is still ready. Reconnect and tap Apply Decision again.'
+        : missingHomeChannel
+        ? 'This wallet cannot add funds to checkout yet. Add funds to your shared wallet first, then tap Apply Decision again.'
+        : toHumanErrorMessage(error, 'Failed to submit proposal');
+      setSystemMessage(message);
+      notifyError(message);
       await Promise.all([fetchRooms(), fetchRoomThread(activeRoom.id)]).catch(() => null);
     } finally {
       setBusy(null);
@@ -1793,6 +1914,8 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     refreshCoreData,
     fetchRooms,
     fetchRoomThread,
+    notifyError,
+    notifySuccess,
   ]);
 
   const runDeposit = useCallback(async () => {
@@ -1862,9 +1985,11 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       await client.deposit(selectedAsset.token as Address, raw);
       await refreshCoreData();
       clearWalletActionError();
-      setSystemMessage(`Added ${fundingAmount} ${selectedAsset.symbol.toUpperCase()} to your shared wallet.`);
+      const success = `Added ${fundingAmount} ${selectedAsset.symbol.toUpperCase()} to your shared wallet.`;
+      setSystemMessage(success);
+      notifySuccess(success);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Deposit failed';
+      const message = toHumanErrorMessage(error, 'Deposit failed');
       setSystemMessage(message);
       showWalletActionError('deposit', message);
     } finally {
@@ -1878,6 +2003,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     refreshCoreData,
     clearWalletActionError,
     showWalletActionError,
+    notifySuccess,
   ]);
 
   const runWithdraw = useCallback(async () => {
@@ -1890,15 +2016,25 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       await client.withdrawal(selectedAsset.token as Address, raw);
       await refreshCoreData();
       clearWalletActionError();
-      setSystemMessage(`Moved ${withdrawAmount} ${selectedAsset.symbol.toUpperCase()} back to your on-chain wallet.`);
+      const success = `Moved ${withdrawAmount} ${selectedAsset.symbol.toUpperCase()} back to your on-chain wallet.`;
+      setSystemMessage(success);
+      notifySuccess(success);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Withdraw failed';
+      const message = toHumanErrorMessage(error, 'Withdraw failed');
       setSystemMessage(message);
       showWalletActionError('withdraw', message);
     } finally {
       setBusy(null);
     }
-  }, [client, selectedAsset, withdrawAmount, refreshCoreData, clearWalletActionError, showWalletActionError]);
+  }, [
+    client,
+    selectedAsset,
+    withdrawAmount,
+    refreshCoreData,
+    clearWalletActionError,
+    showWalletActionError,
+    notifySuccess,
+  ]);
 
   const runTransferToCounterparty = useCallback(async () => {
     if (!client || !selectedAsset || !activeRoom) return;
@@ -1918,9 +2054,11 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
 
       await refreshCoreData();
       clearWalletActionError();
-      setSystemMessage(`Transferred ${transferAmount} ${selectedAsset.symbol.toUpperCase()} to counterparty.`);
+      const success = `Transferred ${transferAmount} ${selectedAsset.symbol.toUpperCase()} to counterparty.`;
+      setSystemMessage(success);
+      notifySuccess(success);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Transfer failed';
+      const message = toHumanErrorMessage(error, 'Transfer failed');
       setSystemMessage(message);
       showWalletActionError('transfer', message);
     } finally {
@@ -1935,6 +2073,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     refreshCoreData,
     clearWalletActionError,
     showWalletActionError,
+    notifySuccess,
   ]);
 
   const runCloseChannel = useCallback(async () => {
@@ -1946,15 +2085,17 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       await client.closeChannel({ tokenAddress: selectedAsset.token });
       await refreshCoreData();
       clearWalletActionError();
-      setSystemMessage(`Closed the ${selectedAsset.symbol.toUpperCase()} shared wallet channel.`);
+      const success = `Closed the ${selectedAsset.symbol.toUpperCase()} shared wallet channel.`;
+      setSystemMessage(success);
+      notifySuccess(success);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Close channel failed';
+      const message = toHumanErrorMessage(error, 'Close channel failed');
       setSystemMessage(message);
       showWalletActionError('close', message);
     } finally {
       setBusy(null);
     }
-  }, [client, selectedAsset, refreshCoreData, clearWalletActionError, showWalletActionError]);
+  }, [client, selectedAsset, refreshCoreData, clearWalletActionError, showWalletActionError, notifySuccess]);
 
   const runDevAction = useCallback(
     async (name: string, fn: () => Promise<unknown>) => {
@@ -2101,6 +2242,20 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     return `${window.location.origin}/r/${activeRoomId}`;
   }, [activeRoomId]);
 
+  const handleCopyInvite = useCallback(async () => {
+    if (!roomShareUrl) return;
+    await navigator.clipboard.writeText(roomShareUrl);
+    setCopiedInvite(true);
+    if (copyInviteTimerRef.current !== null) {
+      window.clearTimeout(copyInviteTimerRef.current);
+    }
+    copyInviteTimerRef.current = window.setTimeout(() => {
+      setCopiedInvite(false);
+      copyInviteTimerRef.current = null;
+    }, 1800);
+    notifySuccess('Invite link copied to clipboard.');
+  }, [roomShareUrl, notifySuccess]);
+
   const aliasKey = useMemo(
     () => (currentCounterparty ? normalizeAddress(currentCounterparty) : ''),
     [currentCounterparty],
@@ -2108,15 +2263,18 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
   const onboardingSlide = ONBOARDING_SLIDES[onboardingIndex];
 
   const nextOnboardingSlide = useCallback(() => {
+    setOnboardingDirection(1);
     setOnboardingIndex((index) => (index + 1) % ONBOARDING_SLIDES.length);
   }, []);
 
   const prevOnboardingSlide = useCallback(() => {
+    setOnboardingDirection(-1);
     setOnboardingIndex((index) => (index - 1 + ONBOARDING_SLIDES.length) % ONBOARDING_SLIDES.length);
   }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
+      setOnboardingDirection(1);
       setOnboardingIndex((index) => (index + 1) % ONBOARDING_SLIDES.length);
     }, 9000);
 
@@ -2143,7 +2301,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
 
   return (
     <main className="mx-auto max-w-7xl px-4 pb-10 pt-6 md:px-8 md:pt-10">
-      <section className="card mb-6 overflow-hidden">
+      <motion.section {...CARD_MOTION} className="card mb-6 overflow-hidden">
         <div className="bg-hero-grid px-5 py-6 md:px-8 md:py-8">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div>
@@ -2173,19 +2331,27 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
               </p>
               <div className="flex gap-2">
                 {!walletAddress ? (
-                  <button
+                  <motion.button
+                    {...BUTTON_MOTION}
                     className="btn-primary rounded-md px-4 py-2 font-semibold"
                     onClick={connectWallet}
                     disabled={busy === 'connect_wallet'}>
-                    {busy === 'connect_wallet' ? 'Connecting...' : 'Connect Wallet'}
-                  </button>
+                    <span className="inline-flex items-center gap-1.5">
+                      <Wallet size={16} />
+                      {busy === 'connect_wallet' ? 'Connecting...' : 'Connect Wallet'}
+                    </span>
+                  </motion.button>
                 ) : (
-                  <button
+                  <motion.button
+                    {...BUTTON_MOTION}
                     className="btn-secondary rounded-md px-4 py-2 font-semibold"
                     onClick={disconnectWallet}
                     disabled={busy === 'disconnect_wallet'}>
-                    Disconnect
-                  </button>
+                    <span className="inline-flex items-center gap-1.5">
+                      <LogOut size={16} />
+                      Disconnect
+                    </span>
+                  </motion.button>
                 )}
               </div>
             </div>
@@ -2200,9 +2366,9 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
             </p>
           ) : null}
         </div>
-      </section>
+      </motion.section>
 
-      <section className="card mb-6 p-4 md:p-5">
+      <motion.section {...CARD_MOTION} className="card mb-6 p-4 md:p-5">
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
             <div className="flex items-center gap-2">
@@ -2215,21 +2381,43 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
           </div>
 
           <div className="flex gap-2">
-            <button className="btn-secondary rounded-md px-3 py-1.5 text-sm font-semibold" onClick={prevOnboardingSlide}>
-              Back
-            </button>
-            <button className="btn-primary rounded-md px-3 py-1.5 text-sm font-semibold" onClick={nextOnboardingSlide}>
-              Next
-            </button>
+            <motion.button
+              {...BUTTON_MOTION}
+              className="btn-secondary rounded-md px-3 py-1.5 text-sm font-semibold"
+              onClick={prevOnboardingSlide}>
+              <span className="inline-flex items-center gap-1.5">
+                <ChevronLeft size={15} />
+                Back
+              </span>
+            </motion.button>
+            <motion.button
+              {...BUTTON_MOTION}
+              className="btn-primary rounded-md px-3 py-1.5 text-sm font-semibold"
+              onClick={nextOnboardingSlide}>
+              <span className="inline-flex items-center gap-1.5">
+                Next
+                <ChevronRight size={15} />
+              </span>
+            </motion.button>
           </div>
         </div>
 
-        <div className="onboarding-slide mt-4 rounded-xl border p-4 md:p-5">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-700">
-            {onboardingSlide.subtitle}
-          </p>
-          <h3 className="mt-2 text-xl font-bold text-black md:text-2xl">{onboardingSlide.title}</h3>
-          <p className="mt-2 max-w-3xl text-sm text-neutral-800 md:text-base">{onboardingSlide.description}</p>
+        <div className="mt-4 min-h-[190px]">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={onboardingIndex}
+              className="onboarding-slide rounded-xl border p-4 md:p-5"
+              initial={{ opacity: 0, x: onboardingDirection > 0 ? 36 : -36 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: onboardingDirection > 0 ? -36 : 36 }}
+              transition={{ type: 'spring', stiffness: 260, damping: 28 }}>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-700">
+                {onboardingSlide.subtitle}
+              </p>
+              <h3 className="mt-2 text-xl font-bold text-black md:text-2xl">{onboardingSlide.title}</h3>
+              <p className="mt-2 max-w-3xl text-sm text-neutral-800 md:text-base">{onboardingSlide.description}</p>
+            </motion.div>
+          </AnimatePresence>
         </div>
 
         <div className="mt-4 flex items-center gap-2">
@@ -2242,7 +2430,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
             />
           ))}
         </div>
-      </section>
+      </motion.section>
 
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="space-y-6 lg:col-span-4">
@@ -2275,12 +2463,17 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                 </select>
               </label>
 
-              <button
+              <motion.button
+                {...BUTTON_MOTION}
                 className="btn-primary w-full rounded-md px-4 py-2 font-semibold"
                 onClick={createRoom}
                 disabled={!walletAddress || busy === 'create_room'}>
-                {busy === 'create_room' ? 'Creating...' : 'Create Shared Cart'}
-              </button>
+                <span className="inline-flex items-center gap-1.5">
+                  <ShoppingCart size={16} />
+                  <Plus size={14} />
+                  {busy === 'create_room' ? 'Creating...' : 'Create Shared Cart'}
+                </span>
+              </motion.button>
             </div>
           </div>
 
@@ -2308,7 +2501,9 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                     const roomStatus = roomSession?.status ?? room.status;
                     const roomStatusLabel = toHumanCheckoutStatus(roomStatus);
                     return (
-                      <button
+                      <motion.button
+                        layout
+                        {...BUTTON_MOTION}
                         key={room.id}
                         className={`w-full rounded-md border px-3 py-2 text-left transition ${
                           room.id === activeRoomId
@@ -2326,7 +2521,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                         <p className="mt-1 text-xs text-neutral-600">
                           {room.asset_symbol.toUpperCase()} • {shortAddress(room.participant_a)} + {shortAddress(room.participant_b)}
                         </p>
-                      </button>
+                      </motion.button>
                     );
                   })()
                 ))
@@ -2353,14 +2548,18 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                         {summary.total} total • {summary.open} open • {summary.closed} closed
                       </p>
                       {linkedRoom ? (
-                        <button
+                        <motion.button
+                          {...BUTTON_MOTION}
                           className="mt-2 btn-secondary rounded px-2 py-1 text-xs font-semibold"
                           onClick={() => {
                             setActiveRoomId(linkedRoom.id);
                             router.push(`/r/${linkedRoom.id}`);
                           }}>
-                          Open Cart
-                        </button>
+                          <span className="inline-flex items-center gap-1">
+                            <ExternalLink size={13} />
+                            Open Cart
+                          </span>
+                        </motion.button>
                       ) : null}
                     </div>
                   );
@@ -2397,13 +2596,20 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                   <p className="font-semibold">Share Invite URL</p>
                   <p className="mt-1 font-mono break-all">{roomShareUrl}</p>
                   <div className="mt-2 flex gap-2">
-                    <button
+                    <motion.button
+                      {...BUTTON_MOTION}
                       className="btn-primary rounded px-2 py-1 text-xs font-semibold"
-                      onClick={() => navigator.clipboard.writeText(roomShareUrl)}>
-                      Copy
-                    </button>
+                      onClick={handleCopyInvite}>
+                      <span className="inline-flex items-center gap-1">
+                        {copiedInvite ? <Check size={14} /> : <Copy size={14} />}
+                        {copiedInvite ? 'Copied' : 'Copy'}
+                      </span>
+                    </motion.button>
                     <Link href={roomShareUrl} className="btn-secondary rounded px-2 py-1 text-xs font-semibold">
-                      Open
+                      <span className="inline-flex items-center gap-1">
+                        <ExternalLink size={14} />
+                        Open
+                      </span>
                     </Link>
                   </div>
                 </div>
@@ -2431,9 +2637,12 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                           value={aliasInput}
                           onChange={(event) => setAliasInput(event.target.value)}
                         />
-                        <button className="btn-primary rounded px-2 py-1 text-xs font-semibold" onClick={upsertAlias}>
+                        <motion.button
+                          {...BUTTON_MOTION}
+                          className="btn-primary rounded px-2 py-1 text-xs font-semibold"
+                          onClick={upsertAlias}>
                           Save
-                        </button>
+                        </motion.button>
                       </div>
                     </div>
                   ) : null}
@@ -2446,7 +2655,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                   </div>
                   <p className="mt-2 text-xs text-neutral-600">
                     App Session ID:
-                    <span className="mt-1 block max-w-full break-all font-mono text-[11px] leading-relaxed text-neutral-900">
+                    <span className="mt-1 block max-w-full overflow-hidden break-all font-mono text-[11px] leading-relaxed text-neutral-900 [overflow-wrap:anywhere]">
                       {activeRoom.app_session_id ?? 'Not created'}
                     </span>
                   </p>
@@ -2490,55 +2699,69 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <div className="inline-flex items-center gap-2">
-                    <button
+                    <motion.button
+                      {...BUTTON_MOTION}
                       className="btn-primary rounded px-3 py-2 text-sm font-semibold"
                       onClick={createSessionProposal}
                       disabled={Boolean(activeRoom.app_session_id) || busy === 'proposal_create_session' || areRoomActionsLocked}>
-                      {busy === 'proposal_create_session' ? 'Creating...' : 'Start Shared Checkout'}
-                    </button>
+                      <span className="inline-flex items-center gap-1.5">
+                        <PlayCircle size={16} />
+                        {busy === 'proposal_create_session' ? 'Creating...' : 'Start Shared Checkout'}
+                      </span>
+                    </motion.button>
                     <InfoHint text="Opens shared checkout for this cart. Both shoppers must approve once." />
                   </div>
                   <div className="inline-flex items-center gap-2">
-                    <span title={addFundsToCheckoutDisabledReason ?? undefined} className="inline-flex">
-                      <button
+                    <div className="inline-flex flex-col gap-1">
+                      <motion.button
+                        {...BUTTON_MOTION}
                         className="btn-primary rounded px-3 py-2 text-sm font-semibold"
                         onClick={createDepositProposal}
                         disabled={Boolean(addFundsToCheckoutDisabledReason) || busy === 'proposal_deposit'}>
-                        {busy === 'proposal_deposit' ? 'Creating...' : 'Add Funds To Checkout'}
-                      </button>
-                    </span>
+                        <span className="inline-flex items-center gap-1.5">
+                          <ArrowDownToLine size={16} />
+                          {busy === 'proposal_deposit' ? 'Creating...' : 'Add Funds To Checkout'}
+                        </span>
+                      </motion.button>
+                      {addFundsToCheckoutDisabledReason ? (
+                        <p className="max-w-xs text-[11px] font-medium text-rose-700">
+                          {addFundsToCheckoutDisabledReason}
+                        </p>
+                      ) : null}
+                    </div>
                     <InfoHint text="Moves funds into checkout balance. The wallet adding funds must submit after both agree." />
                   </div>
                   <div className="inline-flex items-center gap-2">
-                    <button
+                    <motion.button
+                      {...BUTTON_MOTION}
                       className="btn-primary rounded px-3 py-2 text-sm font-semibold"
                       onClick={createOperateProposal}
                       disabled={!activeRoom.app_session_id || busy === 'proposal_operate' || areRoomActionsLocked}>
-                      {busy === 'proposal_operate' ? 'Creating...' : 'Propose Purchase'}
-                    </button>
+                      <span className="inline-flex items-center gap-1.5">
+                        <Receipt size={16} />
+                        {busy === 'proposal_operate' ? 'Creating...' : 'Propose Purchase'}
+                      </span>
+                    </motion.button>
                     <InfoHint text="Approves a purchase by reallocating funds already inside checkout." />
                   </div>
                   <div className="inline-flex items-center gap-2">
-                    <button
+                    <motion.button
+                      {...BUTTON_MOTION}
                       className="btn-secondary rounded px-3 py-2 text-sm font-semibold"
                       onClick={createCloseProposal}
                       disabled={!activeRoom.app_session_id || busy === 'proposal_close' || areRoomActionsLocked}>
-                      {busy === 'proposal_close' ? 'Creating...' : 'Finish Checkout'}
-                    </button>
+                      <span className="inline-flex items-center gap-1.5">
+                        <CheckCircle2 size={16} />
+                        {busy === 'proposal_close' ? 'Creating...' : 'Finish Checkout'}
+                      </span>
+                    </motion.button>
                     <InfoHint text="Finishes checkout with final balances so no new purchases can be proposed." />
                   </div>
                 </div>
-                {activeRoom.app_session_id && activeRoomAsset ? (
+                {activeRoom.app_session_id && activeRoomAsset && hasReadyWalletChannelForActiveRoomAsset ? (
                   <p
-                    className={`mt-3 rounded border px-3 py-2 text-xs ${
-                      hasReadyWalletChannelForActiveRoomAsset
-                        ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
-                        : 'border-orange-300 bg-orange-100 text-orange-900'
-                    }`}>
-                    Shared wallet channel for {activeRoom.asset_symbol.toUpperCase()}:{' '}
-                    {hasReadyWalletChannelForActiveRoomAsset
-                      ? 'ready'
-                      : `not ready. Open a channel with ${activeRoom.asset_symbol.toUpperCase()} to be able to add funds to checkout.`}
+                    className="mt-3 rounded border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+                    Shared wallet channel for {activeRoom.asset_symbol.toUpperCase()}: ready.
                   </p>
                 ) : null}
                 {areRoomActionsLocked ? (
@@ -2579,7 +2802,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                 </div>
 
                 <p className="mt-2 text-xs text-neutral-700">Hash:</p>
-                <p className="mt-1 break-all rounded border border-neutral-200 bg-white/60 px-2 py-1 font-mono text-[11px] leading-relaxed text-neutral-800">
+                <p className="mt-1 overflow-hidden break-all rounded border border-neutral-200 bg-white/60 px-2 py-1 font-mono text-[11px] leading-relaxed text-neutral-800 [overflow-wrap:anywhere]">
                   {activeProposal.payload_hash}
                 </p>
 
@@ -2589,7 +2812,11 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                     <span>{signatureProgress}%</span>
                   </div>
                   <div className="h-2 overflow-hidden rounded bg-black/10">
-                    <div className="h-full bg-yellow-brand" style={{ width: `${signatureProgress}%` }} />
+                    <motion.div
+                      className="h-full bg-yellow-brand"
+                      animate={{ width: `${signatureProgress}%` }}
+                      transition={{ type: 'spring', stiffness: 120, damping: 24 }}
+                    />
                   </div>
                   <p className="mt-2 text-xs text-neutral-700">
                     Approvals: {Object.keys(activeProposal.signatures_json ?? {}).length}/2
@@ -2597,23 +2824,31 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                 </div>
 
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <button
+                  <motion.button
+                    {...BUTTON_MOTION}
                     className="btn-primary rounded px-3 py-2 text-sm font-semibold"
                     onClick={() => signProposal(activeProposal)}
                     disabled={busy === 'proposal_sign' || hasSignedActiveProposal || areRoomActionsLocked}>
-                    {hasSignedActiveProposal
-                      ? 'Signed'
-                      : busy === 'proposal_sign'
-                      ? 'Signing...'
-                      : 'Agree'}
-                  </button>
+                    <span className="inline-flex items-center gap-1.5">
+                      <PenLine size={16} />
+                      {hasSignedActiveProposal
+                        ? 'Signed'
+                        : busy === 'proposal_sign'
+                        ? 'Signing...'
+                        : 'Agree'}
+                    </span>
+                  </motion.button>
 
-                  <button
+                  <motion.button
+                    {...BUTTON_MOTION}
                     className="btn-secondary rounded px-3 py-2 text-sm font-semibold"
                     onClick={() => openSubmitConfirm(activeProposal)}
                     disabled={busy === 'proposal_submit' || !canSubmitActiveProposal || areRoomActionsLocked}>
-                    {busy === 'proposal_submit' ? 'Applying...' : 'Review & Apply'}
-                  </button>
+                    <span className="inline-flex items-center gap-1.5">
+                      <Send size={16} />
+                      {busy === 'proposal_submit' ? 'Applying...' : 'Review & Apply'}
+                    </span>
+                  </motion.button>
                 </div>
                 {activeProposalLabel === 'session_deposit' &&
                 activeProposal.status === 'ready' &&
@@ -2636,14 +2871,20 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                 {events.length === 0 ? (
                   <p className="text-sm text-neutral-600">No events yet.</p>
                 ) : (
-                  events.map((event) => (
-                    <div key={event.id} className="rounded-md border border-neutral-200 p-2 text-xs">
+                  events.map((event, index) => (
+                    <motion.div
+                      key={event.id}
+                      className="rounded-md border border-neutral-200 p-2 text-xs"
+                      initial={{ opacity: 0, y: 8 }}
+                      whileInView={{ opacity: 1, y: 0 }}
+                      viewport={{ once: true, amount: 0.25 }}
+                      transition={{ delay: Math.min(index * 0.04, 0.24), duration: 0.24 }}>
                       <div className="flex items-center justify-between gap-2">
                         <span className="font-semibold uppercase text-neutral-800">{toHumanEventType(event)}</span>
                         <span className="text-neutral-500">{formatDate(event.created_at)}</span>
                       </div>
                       <p className="mt-1 font-mono text-neutral-600">{shortAddress(event.actor, 8)}</p>
-                    </div>
+                    </motion.div>
                   ))
                 )}
               </div>
@@ -2664,17 +2905,23 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                 <span className="mb-1 block text-xs font-medium">Currency</span>
                 <select
                   className="w-full rounded-md border border-neutral-300 px-3 py-2 text-sm"
-                  value={selectedAsset?.symbol.toLowerCase() ?? ''}
-                  disabled={!client || !walletAddress || supportedAssets.length === 0}
+                  value={fundsAssetSymbol}
+                  disabled={!client || !walletAddress}
                   onChange={(event) => {
                     setFundsAssetSymbol(event.target.value === 'weth' ? 'weth' : 'usdc');
                   }}>
-                  {supportedAssets.map((asset) => (
-                    <option key={asset.token} value={asset.symbol.toLowerCase()}>
-                      {asset.symbol.toUpperCase()}
+                  {FUNDS_ASSET_OPTIONS.map((symbol) => (
+                    <option key={symbol} value={symbol}>
+                      {symbol.toUpperCase()}
+                      {supportedAssetSymbols.has(symbol) ? '' : ' (Unavailable)'}
                     </option>
                   ))}
                 </select>
+                {!selectedAsset ? (
+                  <p className="mt-1 text-[11px] font-medium text-rose-700">
+                    {fundsAssetSymbol.toUpperCase()} is not available on this Clearnode for your wallet right now.
+                  </p>
+                ) : null}
               </label>
 
               <label>
@@ -2703,30 +2950,42 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
             </div>
 
             <div className="mt-3 flex flex-wrap gap-2">
-              <button
+              <motion.button
+                {...BUTTON_MOTION}
                 className={`btn-primary rounded px-3 py-2 text-sm font-semibold ${
                   isDepositInlineError ? 'btn-error' : ''
                 } ${isDepositInlineError && walletActionErrorShake ? 'error-shake' : ''}`}
                 onClick={runDeposit}
                 disabled={busy === 'deposit' || areFundsActionsLocked || !client || !selectedAsset}>
-                {busy === 'deposit' ? 'Adding...' : 'Add Funds'}
-              </button>
-              <button
+                <span className="inline-flex items-center gap-1.5">
+                  <Plus size={16} />
+                  {busy === 'deposit' ? 'Adding...' : 'Add Funds'}
+                </span>
+              </motion.button>
+              <motion.button
+                {...BUTTON_MOTION}
                 className={`btn-primary rounded px-3 py-2 text-sm font-semibold ${
                   isWithdrawInlineError ? 'btn-error' : ''
                 } ${isWithdrawInlineError && walletActionErrorShake ? 'error-shake' : ''}`}
                 onClick={runWithdraw}
                 disabled={busy === 'withdraw' || areFundsActionsLocked || !client || !selectedAsset}>
-                {busy === 'withdraw' ? 'Moving...' : 'Withdraw To Wallet'}
-              </button>
-              <button
+                <span className="inline-flex items-center gap-1.5">
+                  <ArrowUpFromLine size={16} />
+                  {busy === 'withdraw' ? 'Moving...' : 'Withdraw To Wallet'}
+                </span>
+              </motion.button>
+              <motion.button
+                {...BUTTON_MOTION}
                 className={`btn-secondary rounded px-3 py-2 text-sm font-semibold ${
                   isCloseInlineError ? 'btn-error' : ''
                 } ${isCloseInlineError && walletActionErrorShake ? 'error-shake' : ''}`}
                 onClick={runCloseChannel}
                 disabled={busy === 'close_channel' || areFundsActionsLocked || !client || !selectedAsset}>
-                {busy === 'close_channel' ? 'Closing...' : 'Close Shared Wallet'}
-              </button>
+                <span className="inline-flex items-center gap-1.5">
+                  <XCircle size={16} />
+                  {busy === 'close_channel' ? 'Closing...' : 'Close Shared Wallet'}
+                </span>
+              </motion.button>
             </div>
             {walletActionError ? (
               <p
@@ -2756,14 +3015,18 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                     disabled={areCounterpartyTransferLocked || !client || !selectedAsset}
                     placeholder="0.5"
                   />
-                  <button
+                  <motion.button
+                    {...BUTTON_MOTION}
                     className={`btn-secondary rounded px-3 py-2 text-sm font-semibold ${
                       isTransferInlineError ? 'btn-error' : ''
                     } ${isTransferInlineError && walletActionErrorShake ? 'error-shake' : ''}`}
                     onClick={runTransferToCounterparty}
                     disabled={busy === 'transfer' || areCounterpartyTransferLocked || !client || !selectedAsset}>
-                    {busy === 'transfer' ? 'Sending...' : 'Transfer'}
-                  </button>
+                    <span className="inline-flex items-center gap-1.5">
+                      <ArrowRightLeft size={16} />
+                      {busy === 'transfer' ? 'Sending...' : 'Transfer'}
+                    </span>
+                  </motion.button>
                 </div>
                 {areCounterpartyTransferLocked ? (
                   <p className="mt-3 rounded border border-neutral-300 bg-neutral-100 px-3 py-2 text-xs text-neutral-700">
@@ -2848,21 +3111,33 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
         </div>
       </section>
 
-      <section className="card mt-6 p-4 md:p-5">
+      <motion.section {...CARD_MOTION} className="card mt-6 p-4 md:p-5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <h2 className="text-lg font-bold">Developer Console</h2>
             <InfoHint text="Advanced compat API controls for debugging, diagnostics, and raw JSON inspection." />
           </div>
-          <button
+          <motion.button
+            {...BUTTON_MOTION}
             className="btn-secondary rounded px-3 py-1 text-sm font-semibold"
             onClick={() => setDevOpen((open) => !open)}>
-            {devOpen ? 'Hide' : 'Show'}
-          </button>
+            <span className="inline-flex items-center gap-1.5">
+              <Terminal size={15} />
+              {devOpen ? 'Hide' : 'Show'}
+              <ChevronDown size={14} className={devOpen ? 'rotate-180 transition-transform' : 'transition-transform'} />
+            </span>
+          </motion.button>
         </div>
 
-        {devOpen ? (
-          <>
+        <AnimatePresence initial={false}>
+          {devOpen ? (
+            <motion.div
+              key="dev-console-content"
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.22, ease: 'easeOut' }}
+              className="overflow-hidden">
             <div className="mt-3 flex flex-wrap gap-2 text-xs">
               <button className="btn-primary rounded px-2 py-1 font-semibold" onClick={() => runDevAction('ping', async () => client?.ping())} disabled={!client || !!devBusy}>ping</button>
               <button className="btn-primary rounded px-2 py-1 font-semibold" onClick={() => runDevAction('getConfig', async () => client?.getConfig())} disabled={!client || !!devBusy}>getConfig</button>
@@ -2932,58 +3207,76 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
               {devBusy ? `Running: ${devBusy}\n` : ''}
               {devOutput}
             </pre>
-          </>
-        ) : null}
-      </section>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+      </motion.section>
 
-      {submitConfirmProposal && submitConfirmPreview && activeRoom ? (
-        <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 px-4"
-          onClick={closeSubmitConfirm}>
-          <div
-            className="card w-full max-w-2xl p-4 md:p-5"
-            onClick={(event) => event.stopPropagation()}>
-            <div className="flex items-center justify-between gap-2">
-              <h3 className="text-lg font-bold">Confirm {submitConfirmPreview.actionLabel}</h3>
-              <span className="badge badge-pending">{activeRoom.asset_symbol.toUpperCase()}</span>
-            </div>
-
-            <p className="mt-2 text-sm text-neutral-700">{submitConfirmPreview.summary}</p>
-
-            <div className="mt-4 rounded-md border border-neutral-200 bg-neutral-50 p-3">
-              <p className="text-xs font-semibold uppercase text-neutral-700">
-                Checkout Allocation Change
-              </p>
-              <div className="mt-2 space-y-2">
-                {submitConfirmPreview.rows.map((row) => (
-                  <div
-                    key={`confirm-${row.participant}`}
-                    className="grid grid-cols-1 gap-1 rounded border border-neutral-200 bg-white/80 px-3 py-2 text-xs md:grid-cols-[1.4fr,1fr,1fr,1fr] md:items-center">
-                    <span className="font-semibold text-neutral-800">{getParticipantDisplayName(row.participant)}</span>
-                    <span className="font-mono text-neutral-700">Before: {formatUnits(row.before, activeRoomAsset?.decimals ?? 6)}</span>
-                    <span className="font-mono text-neutral-700">After: {formatUnits(row.after, activeRoomAsset?.decimals ?? 6)}</span>
-                    <span className={`font-mono ${row.delta > 0n ? 'text-emerald-700' : row.delta < 0n ? 'text-rose-700' : 'text-neutral-700'}`}>
-                      Change: {formatSignedUnits(row.delta, activeRoomAsset?.decimals ?? 6)}
-                    </span>
-                  </div>
-                ))}
+      <AnimatePresence>
+        {submitConfirmProposal && submitConfirmPreview && activeRoom ? (
+          <motion.div
+            className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 px-4"
+            onClick={closeSubmitConfirm}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18 }}>
+            <motion.div
+              className="card w-full max-w-2xl p-4 md:p-5"
+              onClick={(event) => event.stopPropagation()}
+              initial={{ opacity: 0, scale: 0.95, y: 22 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 22 }}
+              transition={{ type: 'spring', stiffness: 300, damping: 25 }}>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-lg font-bold">Confirm {submitConfirmPreview.actionLabel}</h3>
+                <span className="badge badge-pending">{activeRoom.asset_symbol.toUpperCase()}</span>
               </div>
-            </div>
 
-            <div className="mt-4 flex flex-wrap justify-end gap-2">
-              <button className="btn-secondary rounded px-3 py-2 text-sm font-semibold" onClick={closeSubmitConfirm}>
-                Cancel
-              </button>
-              <button
-                className="btn-primary rounded px-3 py-2 text-sm font-semibold"
-                onClick={confirmSubmitProposal}
-                disabled={busy === 'proposal_submit'}>
-                {busy === 'proposal_submit' ? 'Applying...' : 'Confirm & Apply'}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+              <p className="mt-2 text-sm text-neutral-700">{submitConfirmPreview.summary}</p>
+
+              <div className="mt-4 rounded-md border border-neutral-200 bg-neutral-50 p-3">
+                <p className="text-xs font-semibold uppercase text-neutral-700">
+                  Checkout Allocation Change
+                </p>
+                <div className="mt-2 space-y-2">
+                  {submitConfirmPreview.rows.map((row) => (
+                    <div
+                      key={`confirm-${row.participant}`}
+                      className="grid grid-cols-1 gap-1 rounded border border-neutral-200 bg-white/80 px-3 py-2 text-xs md:grid-cols-[1.4fr,1fr,1fr,1fr] md:items-center">
+                      <span className="font-semibold text-neutral-800">{getParticipantDisplayName(row.participant)}</span>
+                      <span className="font-mono text-neutral-700">Before: {formatUnits(row.before, activeRoomAsset?.decimals ?? 6)}</span>
+                      <span className="font-mono text-neutral-700">After: {formatUnits(row.after, activeRoomAsset?.decimals ?? 6)}</span>
+                      <span className={`font-mono ${row.delta > 0n ? 'text-emerald-700' : row.delta < 0n ? 'text-rose-700' : 'text-neutral-700'}`}>
+                        Change: {formatSignedUnits(row.delta, activeRoomAsset?.decimals ?? 6)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-4 flex flex-wrap justify-end gap-2">
+                <motion.button
+                  {...BUTTON_MOTION}
+                  className="btn-secondary rounded px-3 py-2 text-sm font-semibold"
+                  onClick={closeSubmitConfirm}>
+                  Cancel
+                </motion.button>
+                <motion.button
+                  {...BUTTON_MOTION}
+                  className="btn-primary rounded px-3 py-2 text-sm font-semibold"
+                  onClick={confirmSubmitProposal}
+                  disabled={busy === 'proposal_submit'}>
+                  <span className="inline-flex items-center gap-1.5">
+                    <Send size={16} />
+                    {busy === 'proposal_submit' ? 'Applying...' : 'Confirm & Apply'}
+                  </span>
+                </motion.button>
+              </div>
+            </motion.div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
     </main>
   );
 }

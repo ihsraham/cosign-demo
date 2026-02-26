@@ -49,7 +49,6 @@ button {
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
   border-radius: 16px;
-  animation: card-enter 260ms ease-out both;
 }
 
 .btn-primary {
@@ -106,6 +105,12 @@ textarea:focus {
   outline: none;
   border-color: rgba(252, 208, 0, 0.95) !important;
   box-shadow: 0 0 0 3px rgba(252, 208, 0, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(252, 208, 0, 0.34);
 }
 
 .input-error {
@@ -251,15 +256,24 @@ textarea:focus {
   background: linear-gradient(90deg, rgba(252, 208, 0, 0.95), rgba(255, 225, 82, 0.86));
 }
 
-@keyframes card-enter {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.22);
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.6);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.32);
 }
 
 @keyframes error-shake {
