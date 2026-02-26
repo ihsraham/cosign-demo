@@ -314,6 +314,29 @@ function isMissingHomeChannelForDeposit(error: unknown): boolean {
   );
 }
 
+function toManualFlushErrorMessage(error: unknown, assetSymbol?: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+  const assetLabel = assetSymbol ? assetSymbol.toUpperCase() : 'the selected asset';
+
+  if (
+    lower.includes('ongoing state transitions check failed') &&
+    lower.includes('home deposit is still ongoing')
+  ) {
+    return `A previous Add Funds action for ${assetLabel} is still finalizing on-chain. Please wait a few seconds and retry.`;
+  }
+
+  if (lower.includes('allowance is not sufficient to cover the deposit amount')) {
+    return `Token approval is too low for ${assetLabel}. Approve ${assetLabel} spending, then retry manual flush.`;
+  }
+
+  if (lower.includes('0x2e3b1ec0') || lower.includes('insufficientnodebalance')) {
+    return `${assetLabel} flush cannot be completed right now because node liquidity is low. Ask the Clearnode operator to top up ${assetLabel} vault liquidity, then retry.`;
+  }
+
+  return message;
+}
+
 function stringifyDevValue(value: unknown): string {
   const seen = new WeakSet<object>();
   return JSON.stringify(
@@ -372,6 +395,7 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
   const [devOpen, setDevOpen] = useState(false);
   const [devOutput, setDevOutput] = useState<string>('{}');
   const [devBusy, setDevBusy] = useState<string | null>(null);
+  const [devFlushAssetSymbol, setDevFlushAssetSymbol] = useState<'usdc' | 'weth'>('usdc');
   const [onboardingIndex, setOnboardingIndex] = useState(0);
   const [submitConfirmProposalId, setSubmitConfirmProposalId] = useState<string | null>(null);
 
@@ -449,6 +473,17 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       ) ?? supportedAssets[0] ?? null
     );
   }, [supportedAssets, activeRoom, fundsAssetSymbol]);
+
+  useEffect(() => {
+    if (supportedAssets.length === 0) return;
+    const hasSelected = supportedAssets.some(
+      (asset) => asset.symbol.toLowerCase() === devFlushAssetSymbol,
+    );
+    if (!hasSelected) {
+      const fallback = supportedAssets[0].symbol.toLowerCase();
+      setDevFlushAssetSymbol(fallback === 'weth' ? 'weth' : 'usdc');
+    }
+  }, [supportedAssets, devFlushAssetSymbol]);
 
   const activeRoomAsset = useMemo(() => {
     if (!activeRoom) return null;
@@ -2758,6 +2793,68 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
 
                 return result;
               })} disabled={!client || !!devBusy}>EventPoller</button>
+            </div>
+
+            <div className="mt-3 rounded-md border border-neutral-200 bg-neutral-50 p-3">
+              <p className="text-[11px] font-semibold uppercase text-neutral-700">
+                Manual Flush Pending State
+              </p>
+              <p className="mt-1 text-xs text-neutral-600">
+                Use this when an asset is stuck with an ongoing home deposit transition.
+              </p>
+              <div className="mt-2 flex flex-wrap items-end gap-2 text-xs">
+                <label className="flex flex-col gap-1">
+                  <span className="text-[11px] font-medium text-neutral-700">Asset</span>
+                  <select
+                    className="rounded border border-neutral-300 px-2 py-1 text-xs"
+                    value={devFlushAssetSymbol}
+                    onChange={(event) =>
+                      setDevFlushAssetSymbol(event.target.value === 'weth' ? 'weth' : 'usdc')
+                    }
+                    disabled={!client || !!devBusy || supportedAssets.length === 0}>
+                    {supportedAssets.length === 0 ? (
+                      <option value="usdc">No assets</option>
+                    ) : (
+                      supportedAssets.map((asset) => (
+                        <option key={`dev-flush-${asset.token}`} value={asset.symbol.toLowerCase()}>
+                          {asset.symbol.toUpperCase()}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </label>
+                <button
+                  className="btn-primary rounded px-2 py-1 font-semibold"
+                  onClick={() =>
+                    runDevAction('manualFlushPendingState', async () => {
+                      if (!client || !walletAddress) return 'client or wallet not ready';
+
+                      const targetAsset =
+                        supportedAssets.find(
+                          (asset) => asset.symbol.toLowerCase() === devFlushAssetSymbol,
+                        ) ?? selectedAsset;
+                      if (!targetAsset) return 'no asset selected';
+
+                      const tokenInfo = await client.resolveToken(targetAsset.token as Address);
+                      let txHash: string;
+                      try {
+                        txHash = await client.innerClient.checkpoint(tokenInfo.symbol);
+                      } catch (error) {
+                        throw new Error(toManualFlushErrorMessage(error, tokenInfo.symbol));
+                      }
+                      await new Promise((resolve) => setTimeout(resolve, 900));
+                      await refreshCoreData();
+
+                      return {
+                        asset: tokenInfo.symbol,
+                        txHash,
+                      };
+                    })
+                  }
+                  disabled={!client || !!devBusy || supportedAssets.length === 0}>
+                  manualFlushPendingState
+                </button>
+              </div>
             </div>
 
             <pre className="mt-3 max-h-80 overflow-auto rounded-md border border-neutral-200 bg-neutral-950 p-3 font-mono text-xs text-green-300">
