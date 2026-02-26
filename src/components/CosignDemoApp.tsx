@@ -1966,22 +1966,6 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
         return;
       }
 
-      const allowance = await client.innerClient.checkTokenAllowance(
-        BigInt(selectedAsset.chainId),
-        selectedAsset.token,
-        walletAddress,
-      );
-
-      if (allowance < raw) {
-        const message = `Allowance for ${selectedAsset.symbol.toUpperCase()} is too low. Requested ${formatUnits(
-          raw,
-          selectedAsset.decimals,
-        )}, allowance ${formatUnits(allowance, selectedAsset.decimals)}.`;
-        setSystemMessage(message);
-        showWalletActionError('deposit', message);
-        return;
-      }
-
       await client.deposit(selectedAsset.token as Address, raw);
       await refreshCoreData();
       clearWalletActionError();
