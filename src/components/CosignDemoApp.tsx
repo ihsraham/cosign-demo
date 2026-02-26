@@ -366,6 +366,12 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
   const [systemMessage, setSystemMessage] = useState<string>('Connect your wallet on Sepolia to begin.');
   const [sessionSyncWarning, setSessionSyncWarning] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [walletActionError, setWalletActionError] = useState<string | null>(null);
+  const [walletActionErrorSource, setWalletActionErrorSource] = useState<
+    'deposit' | 'withdraw' | 'transfer' | 'close' | null
+  >(null);
+  const [walletActionErrorShake, setWalletActionErrorShake] = useState(false);
+  const walletActionErrorShakeTimerRef = useRef<number | null>(null);
 
   const [createRoomCounterparty, setCreateRoomCounterparty] = useState<string>('');
   const [createRoomAsset, setCreateRoomAsset] = useState<'usdc' | 'weth'>('usdc');
@@ -387,6 +393,34 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
   const [onboardingIndex, setOnboardingIndex] = useState(0);
   const [submitConfirmProposalId, setSubmitConfirmProposalId] = useState<string | null>(null);
 
+  const clearWalletActionError = useCallback(() => {
+    setWalletActionError(null);
+    setWalletActionErrorSource(null);
+    setWalletActionErrorShake(false);
+    if (walletActionErrorShakeTimerRef.current !== null) {
+      window.clearTimeout(walletActionErrorShakeTimerRef.current);
+      walletActionErrorShakeTimerRef.current = null;
+    }
+  }, []);
+
+  const showWalletActionError = useCallback(
+    (source: 'deposit' | 'withdraw' | 'transfer' | 'close', message: string) => {
+      setWalletActionError(message);
+      setWalletActionErrorSource(source);
+      if (walletActionErrorShakeTimerRef.current !== null) {
+        window.clearTimeout(walletActionErrorShakeTimerRef.current);
+        walletActionErrorShakeTimerRef.current = null;
+      }
+      setWalletActionErrorShake(false);
+      window.requestAnimationFrame(() => setWalletActionErrorShake(true));
+      walletActionErrorShakeTimerRef.current = window.setTimeout(() => {
+        setWalletActionErrorShake(false);
+        walletActionErrorShakeTimerRef.current = null;
+      }, 320);
+    },
+    [],
+  );
+
   useEffect(() => {
     const stored = window.localStorage.getItem('cosign_aliases');
     if (!stored) return;
@@ -396,6 +430,14 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     } catch {
       // no-op
     }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (walletActionErrorShakeTimerRef.current !== null) {
+        window.clearTimeout(walletActionErrorShakeTimerRef.current);
+      }
+    };
   }, []);
 
   const activeRoom = useMemo(
@@ -454,6 +496,10 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       null,
     [supportedAssets, fundsAssetSymbol],
   );
+
+  useEffect(() => {
+    clearWalletActionError();
+  }, [fundsAssetSymbol, fundingAmount, withdrawAmount, transferAmount, clearWalletActionError]);
 
   const activeRoomAsset = useMemo(() => {
     if (!activeRoom) return null;
@@ -1753,10 +1799,13 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     if (!client || !selectedAsset || !walletAddress) return;
 
     setBusy('deposit');
+    clearWalletActionError();
     try {
       const raw = await client.parseAmount(selectedAsset.token, fundingAmount);
       if (raw <= 0n) {
-        setSystemMessage('Enter an amount greater than 0.');
+        const message = 'Enter an amount greater than 0.';
+        setSystemMessage(message);
+        showWalletActionError('deposit', message);
         return;
       }
 
@@ -1766,9 +1815,9 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
         (selectedAsset.chainId === SEPOLIA_CHAIN_ID ? sepolia.rpcUrls.default.http[0] : null);
 
       if (!rpcUrl) {
-        setSystemMessage(
-          `No RPC URL configured for chain ${selectedAsset.chainId}. Cannot validate ${selectedAsset.symbol.toUpperCase()} balance.`,
-        );
+        const message = `No RPC URL configured for chain ${selectedAsset.chainId}. Cannot validate ${selectedAsset.symbol.toUpperCase()} balance.`;
+        setSystemMessage(message);
+        showWalletActionError('deposit', message);
         return;
       }
 
@@ -1785,12 +1834,12 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       });
 
       if (onchainBalance < raw) {
-        setSystemMessage(
-          `Insufficient on-chain ${selectedAsset.symbol.toUpperCase()} balance. Requested ${formatUnits(
-            raw,
-            selectedAsset.decimals,
-          )}, available ${formatUnits(onchainBalance, selectedAsset.decimals)}.`,
-        );
+        const message = `Insufficient on-chain ${selectedAsset.symbol.toUpperCase()} balance. Requested ${formatUnits(
+          raw,
+          selectedAsset.decimals,
+        )}, available ${formatUnits(onchainBalance, selectedAsset.decimals)}.`;
+        setSystemMessage(message);
+        showWalletActionError('deposit', message);
         return;
       }
 
@@ -1801,45 +1850,61 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       );
 
       if (allowance < raw) {
-        setSystemMessage(
-          `Allowance for ${selectedAsset.symbol.toUpperCase()} is too low. Requested ${formatUnits(
-            raw,
-            selectedAsset.decimals,
-          )}, allowance ${formatUnits(allowance, selectedAsset.decimals)}.`,
-        );
+        const message = `Allowance for ${selectedAsset.symbol.toUpperCase()} is too low. Requested ${formatUnits(
+          raw,
+          selectedAsset.decimals,
+        )}, allowance ${formatUnits(allowance, selectedAsset.decimals)}.`;
+        setSystemMessage(message);
+        showWalletActionError('deposit', message);
         return;
       }
 
       await client.deposit(selectedAsset.token as Address, raw);
       await refreshCoreData();
+      clearWalletActionError();
       setSystemMessage(`Added ${fundingAmount} ${selectedAsset.symbol.toUpperCase()} to your shared wallet.`);
     } catch (error) {
-      setSystemMessage(error instanceof Error ? error.message : 'Deposit failed');
+      const message = error instanceof Error ? error.message : 'Deposit failed';
+      setSystemMessage(message);
+      showWalletActionError('deposit', message);
     } finally {
       setBusy(null);
     }
-  }, [client, selectedAsset, walletAddress, fundingAmount, refreshCoreData]);
+  }, [
+    client,
+    selectedAsset,
+    walletAddress,
+    fundingAmount,
+    refreshCoreData,
+    clearWalletActionError,
+    showWalletActionError,
+  ]);
 
   const runWithdraw = useCallback(async () => {
     if (!client || !selectedAsset) return;
 
     setBusy('withdraw');
+    clearWalletActionError();
     try {
       const raw = await client.parseAmount(selectedAsset.token, withdrawAmount);
       await client.withdrawal(selectedAsset.token as Address, raw);
       await refreshCoreData();
+      clearWalletActionError();
       setSystemMessage(`Moved ${withdrawAmount} ${selectedAsset.symbol.toUpperCase()} back to your on-chain wallet.`);
     } catch (error) {
-      setSystemMessage(error instanceof Error ? error.message : 'Withdraw failed');
+      const message = error instanceof Error ? error.message : 'Withdraw failed';
+      setSystemMessage(message);
+      showWalletActionError('withdraw', message);
     } finally {
       setBusy(null);
     }
-  }, [client, selectedAsset, withdrawAmount, refreshCoreData]);
+  }, [client, selectedAsset, withdrawAmount, refreshCoreData, clearWalletActionError, showWalletActionError]);
 
   const runTransferToCounterparty = useCallback(async () => {
     if (!client || !selectedAsset || !activeRoom) return;
 
     setBusy('transfer');
+    clearWalletActionError();
     try {
       const counterparty = counterpartOf(activeRoom, walletAddress ?? activeRoom.participant_a);
       const raw = await client.parseAmount(selectedAsset.token, transferAmount);
@@ -1852,28 +1917,44 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
       ]);
 
       await refreshCoreData();
+      clearWalletActionError();
       setSystemMessage(`Transferred ${transferAmount} ${selectedAsset.symbol.toUpperCase()} to counterparty.`);
     } catch (error) {
-      setSystemMessage(error instanceof Error ? error.message : 'Transfer failed');
+      const message = error instanceof Error ? error.message : 'Transfer failed';
+      setSystemMessage(message);
+      showWalletActionError('transfer', message);
     } finally {
       setBusy(null);
     }
-  }, [client, selectedAsset, activeRoom, walletAddress, transferAmount, refreshCoreData]);
+  }, [
+    client,
+    selectedAsset,
+    activeRoom,
+    walletAddress,
+    transferAmount,
+    refreshCoreData,
+    clearWalletActionError,
+    showWalletActionError,
+  ]);
 
   const runCloseChannel = useCallback(async () => {
     if (!client || !selectedAsset) return;
 
     setBusy('close_channel');
+    clearWalletActionError();
     try {
       await client.closeChannel({ tokenAddress: selectedAsset.token });
       await refreshCoreData();
+      clearWalletActionError();
       setSystemMessage(`Closed the ${selectedAsset.symbol.toUpperCase()} shared wallet channel.`);
     } catch (error) {
-      setSystemMessage(error instanceof Error ? error.message : 'Close channel failed');
+      const message = error instanceof Error ? error.message : 'Close channel failed';
+      setSystemMessage(message);
+      showWalletActionError('close', message);
     } finally {
       setBusy(null);
     }
-  }, [client, selectedAsset, refreshCoreData]);
+  }, [client, selectedAsset, refreshCoreData, clearWalletActionError, showWalletActionError]);
 
   const runDevAction = useCallback(
     async (name: string, fn: () => Promise<unknown>) => {
@@ -2054,6 +2135,11 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [submitConfirmProposalId]);
+
+  const isDepositInlineError = walletActionErrorSource === 'deposit' && Boolean(walletActionError);
+  const isWithdrawInlineError = walletActionErrorSource === 'withdraw' && Boolean(walletActionError);
+  const isTransferInlineError = walletActionErrorSource === 'transfer' && Boolean(walletActionError);
+  const isCloseInlineError = walletActionErrorSource === 'close' && Boolean(walletActionError);
 
   return (
     <main className="mx-auto max-w-7xl px-4 pb-10 pt-6 md:px-8 md:pt-10">
@@ -2594,7 +2680,9 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
               <label>
                 <span className="mb-1 block text-xs font-medium">Add Funds</span>
                 <input
-                  className="w-full rounded-md border border-neutral-300 px-3 py-2 text-sm"
+                  className={`w-full rounded-md border border-neutral-300 px-3 py-2 text-sm ${
+                    isDepositInlineError ? 'input-error' : ''
+                  } ${isDepositInlineError && walletActionErrorShake ? 'error-shake' : ''}`}
                   value={fundingAmount}
                   onChange={(event) => setFundingAmount(event.target.value)}
                   disabled={areFundsActionsLocked || !client || !selectedAsset}
@@ -2604,7 +2692,9 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
               <label>
                 <span className="mb-1 block text-xs font-medium">Move Back To Wallet</span>
                 <input
-                  className="w-full rounded-md border border-neutral-300 px-3 py-2 text-sm"
+                  className={`w-full rounded-md border border-neutral-300 px-3 py-2 text-sm ${
+                    isWithdrawInlineError ? 'input-error' : ''
+                  } ${isWithdrawInlineError && walletActionErrorShake ? 'error-shake' : ''}`}
                   value={withdrawAmount}
                   onChange={(event) => setWithdrawAmount(event.target.value)}
                   disabled={areFundsActionsLocked || !client || !selectedAsset}
@@ -2614,24 +2704,38 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
 
             <div className="mt-3 flex flex-wrap gap-2">
               <button
-                className="btn-primary rounded px-3 py-2 text-sm font-semibold"
+                className={`btn-primary rounded px-3 py-2 text-sm font-semibold ${
+                  isDepositInlineError ? 'btn-error' : ''
+                } ${isDepositInlineError && walletActionErrorShake ? 'error-shake' : ''}`}
                 onClick={runDeposit}
                 disabled={busy === 'deposit' || areFundsActionsLocked || !client || !selectedAsset}>
                 {busy === 'deposit' ? 'Adding...' : 'Add Funds'}
               </button>
               <button
-                className="btn-primary rounded px-3 py-2 text-sm font-semibold"
+                className={`btn-primary rounded px-3 py-2 text-sm font-semibold ${
+                  isWithdrawInlineError ? 'btn-error' : ''
+                } ${isWithdrawInlineError && walletActionErrorShake ? 'error-shake' : ''}`}
                 onClick={runWithdraw}
                 disabled={busy === 'withdraw' || areFundsActionsLocked || !client || !selectedAsset}>
                 {busy === 'withdraw' ? 'Moving...' : 'Withdraw To Wallet'}
               </button>
               <button
-                className="btn-secondary rounded px-3 py-2 text-sm font-semibold"
+                className={`btn-secondary rounded px-3 py-2 text-sm font-semibold ${
+                  isCloseInlineError ? 'btn-error' : ''
+                } ${isCloseInlineError && walletActionErrorShake ? 'error-shake' : ''}`}
                 onClick={runCloseChannel}
                 disabled={busy === 'close_channel' || areFundsActionsLocked || !client || !selectedAsset}>
                 {busy === 'close_channel' ? 'Closing...' : 'Close Shared Wallet'}
               </button>
             </div>
+            {walletActionError ? (
+              <p
+                className={`mt-3 rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700 ${
+                  walletActionErrorShake ? 'error-shake' : ''
+                }`}>
+                {walletActionError}
+              </p>
+            ) : null}
 
             {activeRoom ? (
               <div className="mt-4 rounded-md border border-neutral-200 p-3">
@@ -2644,14 +2748,18 @@ export function CosignDemoApp({ initialRoomId }: { initialRoomId?: string }) {
                 </p>
                 <div className="mt-2 flex gap-2">
                   <input
-                    className="w-full rounded-md border border-neutral-300 px-3 py-2 text-sm"
+                    className={`w-full rounded-md border border-neutral-300 px-3 py-2 text-sm ${
+                      isTransferInlineError ? 'input-error' : ''
+                    } ${isTransferInlineError && walletActionErrorShake ? 'error-shake' : ''}`}
                     value={transferAmount}
                     onChange={(event) => setTransferAmount(event.target.value)}
                     disabled={areCounterpartyTransferLocked || !client || !selectedAsset}
                     placeholder="0.5"
                   />
                   <button
-                    className="btn-secondary rounded px-3 py-2 text-sm font-semibold"
+                    className={`btn-secondary rounded px-3 py-2 text-sm font-semibold ${
+                      isTransferInlineError ? 'btn-error' : ''
+                    } ${isTransferInlineError && walletActionErrorShake ? 'error-shake' : ''}`}
                     onClick={runTransferToCounterparty}
                     disabled={busy === 'transfer' || areCounterpartyTransferLocked || !client || !selectedAsset}>
                     {busy === 'transfer' ? 'Sending...' : 'Transfer'}
